@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>申請状況一覧</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <script src="https://code.jquery.com/jquery-3.7.0.min.js"></script>
+    <script src="osql.js"></script>
+    <script>
+        document.addEventListener('DOMContentLoaded', ready);
+        var currentRequestRows = [];
+        const REQUEST_EXPORT_HEADERS = ['申請コード', '企画コード', '備品コード', '数量', 'ステータス', '申請者', '申請日時'];
+        const REQUEST_EXPORT_FILENAME = '申請状況一覧.csv';
+        function ready() {
+            init();
+        }
+
+        async function init() {
+            await loadRequestStatuses();
+            setupStorageSync();
+            startPollingUpdates();
+        }
+        function loadRequestStatuses(filter) {
+            var body = document.getElementById('requestStatusBody');
+            body.innerHTML = '<tr><td colspan="7" class="status-message">申請状況を読み込み中…</td></tr>';
+            var where = filter ? `WHERE project_code LIKE '%${filter.replace(/'/g, "''")}%'` : '';
+            var sql = `SELECT request_code AS req, project_code, equipment_code, quantity, status, applicant, DATE_FORMAT(requested_at, '%Y-%m-%d %H:%i') AS requested_at FROM requests ${where} ORDER BY requested_at DESC LIMIT 50;`;
+            osql
+                .connect(sql)
+                .then(function (rows) {
+                    renderRequestStatuses(rows);
+                })
+                .catch(function (error) {
+                    console.error('申請状況取得エラー', error);
+                    body.innerHTML = '<tr><td colspan="7" class="status-message">申請状況の取得に失敗しました。</td></tr>';
+                });
+        }
+        function renderRequestStatuses(rows) {
+            var body = document.getElementById('requestStatusBody');
+            var count = document.getElementById('requestStatusCount');
+            if (!Array.isArray(rows) || !rows.length) {
+                currentRequestRows = [];
+                body.innerHTML = '<tr><td colspan="7" class="status-message">表示できる申請はありません。</td></tr>';
+                if (count) count.textContent = '0 件';
+                return;
+            }
+            currentRequestRows = rows.slice();
+            if (count) count.textContent = `${rows.length} 件`;
+            body.innerHTML = rows.map(function (item) {
+                return `
+                    <tr>
+                        <td>${escapeText(item.req)}</td>
+                        <td>${escapeText(item.project_code)}</td>
+                        <td>${escapeText(item.equipment_code)}</td>
+                        <td>${item.quantity}</td>
+                        <td>${escapeText(item.status)}</td>
+                        <td>${escapeText(item.applicant)}</td>
+                        <td>${escapeText(item.requested_at)}</td>
+                    </tr>
+                `;
+            }).join('');
+        }
+
+        function exportRequestListToCsv() {
+            if (!currentRequestRows.length) {
+                alert('表示中の申請がありません。');
+                return;
+            }
+            downloadCsv(
+                REQUEST_EXPORT_FILENAME,
+                REQUEST_EXPORT_HEADERS,
+                currentRequestRows.map(function (item) {
+                    return [
+                        item.req,
+                        item.project_code,
+                        item.equipment_code,
+                        item.quantity,
+                        item.status,
+                        item.applicant,
+                        item.requested_at,
+                    ];
+                })
+            );
+        }
+
+        function downloadCsv(filename, headers, rows) {
+            var csvLines = [];
+            csvLines.push(headers.join(','));
+            rows.forEach(function (row) {
+                var escapedRow = row.map(function (cell) {
+                    return escapeCsvCell(cell);
+                });
+                csvLines.push(escapedRow.join(','));
+            });
+            var blob = new Blob([csvLines.join('\r\n')], { type: 'text/csv;charset=utf-8;' });
+            var link = document.createElement('a');
+            link.href = URL.createObjectURL(blob);
+            link.setAttribute('download', filename);
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            URL.revokeObjectURL(link.href);
+        }
+
+        function escapeCsvCell(value) {
+            var text = value !== null && value !== undefined ? value.toString() : '';
+            if (/,|\n|"/.test(text)) {
+                return `"${text.replace(/"/g, '""')}"`;
+            }
+            return text;
+        }
+        function escapeText(value) {
+            if (!value) return '';
+            return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+        }
+        function handleFilterChange() {
+            var term = document.getElementById('requestFilter').value.trim();
+            loadRequestStatuses(term);
+        }
+
+        function setupStorageSync() {
+            window.addEventListener('storage', function (event) {
+                if (event.key === 'requests-last-updated') {
+                    reloadWithCurrentFilter();
+                }
+            });
+        }
+
+        var pollingTimerId = null;
+        function startPollingUpdates() {
+            if (pollingTimerId) {
+                return;
+            }
+            pollingTimerId = window.setInterval(function () {
+                reloadWithCurrentFilter();
+            }, 15000);
+        }
+
+        function reloadWithCurrentFilter() {
+            var term = document.getElementById('requestFilter').value.trim();
+            loadRequestStatuses(term);
+        }
+    </script>
+    <style>
+        :root {
+            font-family: 'Inter', system-ui, sans-serif;
+            background: #eef2ff;
+            color: #0f172a;
+        }
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+        }
+        main {
+            max-width: 1100px;
+            margin: 0 auto;
+            padding: 1.5rem;
+        }
+        header h1 {
+            margin: 0;
+            font-size: 2rem;
+        }
+        header p {
+            color: #475569;
+        }
+        .cors-note {
+            background: linear-gradient(120deg, #fde68a, #facc15);
+            padding: 0.8rem 1rem;
+            border-radius: 10px;
+            font-weight: 600;
+            box-shadow: 0 10px 30px rgba(15, 23, 42, 0.12);
+        }
+        .filter-panel {
+            margin: 1rem 0 1.5rem;
+            display: flex;
+            gap: 0.75rem;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+        .filter-panel input {
+            flex: 1;
+            min-width: 200px;
+            padding: 0.6rem 0.9rem;
+            border-radius: 12px;
+            border: 1px solid #cbd5f5;
+            font-size: 0.95rem;
+        }
+        .panel {
+            background: #ffffff;
+            border-radius: 22px;
+            padding: 1.25rem;
+            box-shadow: 0 22px 50px rgba(15, 23, 42, 0.12);
+        }
+        .panel h2 {
+            margin: 0;
+            font-size: 1.4rem;
+        }
+        .panel .subtitle {
+            color: #64748b;
+            font-size: 0.95rem;
+            margin-bottom: 0.75rem;
+        }
+        .table-wrapper {
+            overflow-x: auto;
+        }
+        .list-panel-footer {
+            margin-top: 1rem;
+            display: flex;
+            justify-content: flex-end;
+        }
+
+        .csv-export-button {
+            border: none;
+            border-radius: 14px;
+            padding: 0.6rem 1.2rem;
+            background: #1d4ed8;
+            color: #ffffff;
+            font-weight: 600;
+            cursor: pointer;
+            transition: 0.2s ease;
+        }
+
+        .csv-export-button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 12px 30px rgba(29, 78, 216, 0.25);
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.95rem;
+        }
+        th, td {
+            padding: 0.65rem 0.8rem;
+            border-bottom: 1px solid #e2e8f0;
+            text-align: left;
+        }
+        th {
+            background: #f8fafc;
+            font-weight: 600;
+        }
+        .status-message {
+            text-align: center;
+            padding: 1rem 0;
+            color: #94a3b8;
+        }
+        @media (max-width: 960px) {
+            .filter-panel {
+                flex-direction: column;
+            }
+        }
+    </style>
+</head>
+<body>
+    <main>
+        <header>
+            <div class="admin-actions">
+                <a class="primary-link" href="admin_equipment.html">備品管理へ移動</a>
+            </div>
+            <h1>申請状況一覧</h1>
+            <p>最新の申請を確認し、必要に応じて該当備品の管理画面へ移動してください。</p>
+        </header>
+        <section class="filter-panel">
+            <input id="requestFilter" type="text" placeholder="企画コードで絞り込む" oninput="handleFilterChange()">
+        </section>
+        <section class="panel">
+            <div class="table-wrapper">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>申請コード</th>
+                            <th>企画コード</th>
+                            <th>備品コード</th>
+                            <th>数量</th>
+                            <th>ステータス</th>
+                            <th>申請者</th>
+                            <th>申請日時</th>
+                        </tr>
+                    </thead>
+                    <tbody id="requestStatusBody">
+                        <tr><td colspan="7" class="status-message">申請状況を読み込み中…</td></tr>
+                    </tbody>
+                </table>
+            </div>
+            <div class="list-panel-footer">
+                <button type="button" class="csv-export-button" onclick="exportRequestListToCsv()">
+                    表示中の一覧をCSV出力
+                </button>
+            </div>
+        </section>
+    </main>
+</body>
+</html>
