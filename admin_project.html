@@ -1,0 +1,1038 @@
+<!DOCTYPE html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>企画管理（管理者用）</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <script src="https://code.jquery.com/jquery-3.7.0.min.js"></script>
+    <script src="osql.js"></script>
+    <script>
+      document.addEventListener('DOMContentLoaded', ready);
+
+      function ready() {
+        init();
+      }
+
+      async function init() {
+        await loadProjectData();
+      }
+
+      var projectList = [];
+      var filteredProjectList = [];
+      var editingOriginalCode = null;
+      var projectCsvRows = [];
+      const PROJECT_EXPORT_HEADERS = [
+        '企画コード',
+        '企画名',
+        '企画種別',
+        '責任者',
+        '連絡先',
+        '場所コード',
+        '備考',
+      ];
+      const PROJECT_EXPORT_FILENAME = '企画一覧.csv';
+
+      function handleProjectCsvFile(event) {
+        var file = event && event.target && event.target.files ? event.target.files[0] : null;
+        var feedback = document.getElementById('projectCsvFeedback');
+        var actionButton = document.getElementById('projectCsvAction');
+        projectCsvRows = [];
+        if (feedback) {
+          feedback.textContent = '';
+        }
+        if (!file) {
+          return;
+        }
+        var reader = new FileReader();
+        reader.onload = function (e) {
+          try {
+            var raw = e.target.result;
+            var rows = parseCsv(raw);
+            if (!rows.length) {
+              throw new Error('CSV データがありません。');
+            }
+            var headers = rows[0].map(function (value) {
+              return value.toString().trim();
+            });
+            projectCsvRows = rows.slice(1).map(function (cols) {
+              var row = {};
+              headers.forEach(function (header, index) {
+                row[header] = cols[index] !== undefined ? cols[index] : '';
+              });
+              return row;
+            });
+            var mapped = projectCsvRows.map(mapProjectCsvRow);
+            var validCount = mapped.filter(function (entry) {
+              return entry.project_code && entry.project_name;
+            }).length;
+            if (feedback) {
+              feedback.textContent = `読み込んだ行：${projectCsvRows.length} 件（有効：${validCount} 件）`;
+            }
+            if (actionButton) {
+              actionButton.disabled = validCount === 0;
+            }
+          } catch (error) {
+            console.error('CSV 読み込みエラー', error);
+            if (feedback) {
+              feedback.textContent = 'CSV ファイルの解析に失敗しました。';
+            }
+            if (actionButton) {
+              actionButton.disabled = true;
+            }
+          }
+        };
+        reader.readAsText(file, 'UTF-8');
+      }
+
+      function parseCsv(raw) {
+        var rows = [];
+        var row = [];
+        var current = '';
+        var inside = false;
+        for (var i = 0; i < raw.length; i++) {
+          var char = raw[i];
+          var next = raw[i + 1];
+          if (char === '"') {
+            if (inside && next === '"') {
+              current += '"';
+              i++;
+              continue;
+            }
+            inside = !inside;
+            continue;
+          }
+          if (char === ',' && !inside) {
+            row.push(current);
+            current = '';
+            continue;
+          }
+          if ((char === '\n' || char === '\r') && !inside) {
+            if (char === '\r' && next === '\n') {
+              i++;
+            }
+            row.push(current);
+            rows.push(row);
+            row = [];
+            current = '';
+            continue;
+          }
+          current += char;
+        }
+        if (current !== '' || row.length) {
+          row.push(current);
+          rows.push(row);
+        }
+        return rows.filter(function (item) {
+          return (
+            item.length &&
+            item.some(function (cell) {
+              return cell !== '';
+            })
+          );
+        });
+      }
+
+      function mapProjectCsvRow(row) {
+        return {
+          project_code: (
+            row.project_code ||
+            row.企画コード ||
+            row['Project Code'] ||
+            row['project code'] ||
+            row.code ||
+            ''
+          )
+            .toString()
+            .trim(),
+          project_name: (
+            row.project_name ||
+            row.企画名 ||
+            row['Project Name'] ||
+            row['project name'] ||
+            row.name ||
+            ''
+          )
+            .toString()
+            .trim(),
+          project_type: (
+            row.project_type ||
+            row.企画種別 ||
+            row['Project Type'] ||
+            row['project type'] ||
+            ''
+          )
+            .toString()
+            .trim(),
+          manager_name: (
+            row.manager_name ||
+            row.責任者 ||
+            row['Manager Name'] ||
+            row['manager name'] ||
+            row.manager ||
+            ''
+          )
+            .toString()
+            .trim(),
+          contact: (row.contact || row.連絡先 || row['Contact'] || row['contact'] || '')
+            .toString()
+            .trim(),
+          location_code: (
+            row.location_code ||
+            row.場所コード ||
+            row['Location Code'] ||
+            row['location code'] ||
+            row.location ||
+            ''
+          )
+            .toString()
+            .trim(),
+          notes: (row.notes || row.備考 || row['Notes'] || row['notes'] || '').toString().trim(),
+        };
+      }
+
+      async function submitCsvImport() {
+        var feedback = document.getElementById('projectCsvFeedback');
+        var actionButton = document.getElementById('projectCsvAction');
+        if (actionButton) {
+          actionButton.disabled = true;
+        }
+        if (!projectCsvRows.length) {
+          if (feedback) {
+            feedback.textContent = '先に CSV を読み込んでください。';
+          }
+          return;
+        }
+        var mapped = projectCsvRows.map(mapProjectCsvRow);
+        var inserted = 0;
+        for (var i = 0; i < mapped.length; i++) {
+          var entry = mapped[i];
+          if (!entry.project_code || !entry.project_name) {
+            continue;
+          }
+          var sql = `INSERT INTO projects (project_code, project_name, project_type, manager_name, contact, location_code, notes) VALUES ('${escapeSql(entry.project_code)}', '${escapeSql(entry.project_name)}', '${escapeSql(entry.project_type)}', '${escapeSql(entry.manager_name)}', '${escapeSql(entry.contact)}', '${escapeSql(entry.location_code)}', '${escapeSql(entry.notes)}');`;
+          try {
+            await osql.connect(sql);
+            inserted++;
+          } catch (error) {
+            console.warn('CSV 登録エラー', error);
+          }
+        }
+        await loadProjectData();
+        if (feedback) {
+          feedback.textContent = `登録完了：${inserted} 件（${mapped.length} 行中）`;
+        }
+        projectCsvRows = [];
+      }
+
+      async function loadProjectData() {
+        var body = document.getElementById('projectTableBody');
+        body.innerHTML =
+          '<tr><td colspan="8" class="status-message">データを読み込み中...</td></tr>';
+        var sql =
+          'SELECT project_code AS code, project_name AS name, project_type AS type, manager_name AS manager, contact, location_code AS location, notes FROM projects ORDER BY project_code;';
+        try {
+          var rows = await osql.connect(sql);
+          if (Array.isArray(rows) && rows.length) {
+            projectList = rows.map(function (item) {
+              return {
+                code: item.code || 'UNKNOWN',
+                name: item.name || '名称未設定',
+                type: item.type || '未分類',
+                manager: item.manager || '未設定',
+                contact: item.contact || '未設定',
+                location: item.location || '',
+                notes: item.notes || '',
+              };
+            });
+          }
+        } catch (error) {
+          console.error('企画データ取得エラー', error);
+        }
+        if (!projectList.length) {
+          projectList = getSampleProjects();
+        }
+        filteredProjectList = projectList.slice();
+        renderProjectRows();
+      }
+
+      function getSampleProjects() {
+        return [
+          {
+            code: 'PROJ-001',
+            name: '新規プロモーション',
+            type: 'イベント',
+            manager: '山田 太郎',
+            contact: 'yamada@example.com',
+            location: 'LOC-901',
+            notes: '夏季キャンペーン',
+          },
+          {
+            code: 'PROJ-002',
+            name: '教材開発',
+            type: '制作',
+            manager: '佐藤 花子',
+            contact: 'sato@example.com',
+            location: 'LOC-902',
+            notes: '第2期',
+          },
+        ];
+      }
+
+      function renderProjectRows() {
+        var body = document.getElementById('projectTableBody');
+        var count = document.getElementById('projectCount');
+        if (!filteredProjectList.length) {
+          body.innerHTML =
+            '<tr><td colspan="8" class="status-message">条件に一致する企画がありません。</td></tr>';
+          count.textContent = '0 件';
+          return;
+        }
+        count.textContent = `${filteredProjectList.length} 件`;
+        body.innerHTML = filteredProjectList
+          .map(function (item) {
+            var safeCode = escapeText(item.code);
+            return `
+                        <tr>
+                            <td>${safeCode}</td>
+                            <td>${escapeText(item.name)}</td>
+                            <td>${escapeText(item.type)}</td>
+                            <td>${escapeText(item.manager)}</td>
+                            <td>${escapeText(item.contact)}</td>
+                            <td>${escapeText(item.location)}</td>
+                            <td>${escapeText(item.notes)}</td>
+                            <td class="actions">
+                                <button type="button" class="action-button edit" onclick="enterEditMode('${safeCode}')">編集</button>
+                                <button type="button" class="action-button delete" onclick="handleDeleteProject('${safeCode}')">削除</button>
+                            </td>
+                        </tr>
+                    `;
+          })
+          .join('');
+      }
+
+      function exportProjectListToCsv() {
+        if (!filteredProjectList.length) {
+          alert('表示中の企画がありません。');
+          return;
+        }
+        downloadCsv(
+          PROJECT_EXPORT_FILENAME,
+          PROJECT_EXPORT_HEADERS,
+          filteredProjectList.map(function (item) {
+            return [
+              item.code,
+              item.name,
+              item.type,
+              item.manager,
+              item.contact,
+              item.location,
+              item.notes,
+            ];
+          })
+        );
+      }
+
+      function downloadCsv(filename, headers, rows) {
+        var csvLines = [];
+        csvLines.push(headers.join(','));
+        rows.forEach(function (row) {
+          var escapedRow = row.map(function (cell) {
+            return escapeCsvCell(cell);
+          });
+          csvLines.push(escapedRow.join(','));
+        });
+        var blob = new Blob([csvLines.join('\r\n')], { type: 'text/csv;charset=utf-8;' });
+        var link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+        link.setAttribute('download', filename);
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(link.href);
+      }
+
+      function escapeCsvCell(value) {
+        var text = value !== null && value !== undefined ? value.toString() : '';
+        if (/,|\n|"/.test(text)) {
+          return `"${text.replace(/"/g, '""')}"`;
+        }
+        return text;
+      }
+
+      function handleProjectFilter(event) {
+        var keyword = document.getElementById('projectSearch').value.trim().toLowerCase();
+        if (!keyword) {
+          filteredProjectList = projectList.slice();
+        } else {
+          filteredProjectList = projectList.filter(function (item) {
+            return (
+              item.code.toLowerCase().indexOf(keyword) !== -1 ||
+              item.name.toLowerCase().indexOf(keyword) !== -1 ||
+              item.manager.toLowerCase().indexOf(keyword) !== -1
+            );
+          });
+        }
+        renderProjectRows();
+      }
+
+      async function handleRegisterProject(event) {
+        event.preventDefault();
+        var code = document.getElementById('projectCodeInput').value.trim();
+        var name = document.getElementById('projectNameInput').value.trim();
+        var type = document.getElementById('projectTypeInput').value.trim();
+        var manager = document.getElementById('projectManagerInput').value.trim();
+        var contact = document.getElementById('projectContactInput').value.trim();
+        var locationCode = document.getElementById('projectLocationCodeInput').value.trim();
+        var notes = document.getElementById('projectNotesInput').value.trim();
+
+        if (!code || !name) {
+          alert('企画コードと企画名は必須です。');
+          return;
+        }
+
+        var isEditing = Boolean(editingOriginalCode);
+        var sql;
+        if (isEditing) {
+          sql = `UPDATE projects SET project_code='${escapeSql(code)}', project_name='${escapeSql(name)}', project_type='${escapeSql(type)}', manager_name='${escapeSql(manager)}', contact='${escapeSql(contact)}', location_code='${escapeSql(locationCode)}', notes='${escapeSql(notes)}' WHERE project_code='${escapeSql(editingOriginalCode)}';`;
+        } else {
+          sql = `INSERT INTO projects (project_code, project_name, project_type, manager_name, contact, location_code, notes) VALUES ('${escapeSql(code)}', '${escapeSql(name)}', '${escapeSql(type)}', '${escapeSql(manager)}', '${escapeSql(contact)}', '${escapeSql(locationCode)}', '${escapeSql(notes)}');`;
+        }
+
+        try {
+          await osql.connect(sql);
+          var updatedEntry = {
+            code: code,
+            name: name,
+            type: type || '未分類',
+            manager: manager || '未設定',
+            contact: contact || '未設定',
+            location: locationCode || '',
+            notes: notes,
+          };
+          if (isEditing) {
+            var index = projectList.findIndex(function (item) {
+              return item.code === editingOriginalCode;
+            });
+            if (index !== -1) {
+              projectList[index] = updatedEntry;
+            } else {
+              projectList.unshift(updatedEntry);
+            }
+            await logOperation('企画編集', `${editingOriginalCode} → ${code}`);
+          } else {
+            projectList.unshift(updatedEntry);
+            await logOperation('企画登録', code);
+          }
+          filteredProjectList = projectList.slice();
+          renderProjectRows();
+          resetProjectForm();
+          alert(isEditing ? '企画情報を更新しました。' : '企画を登録しました。');
+        } catch (error) {
+          console.error('企画登録エラー', error);
+          alert(isEditing ? '企画の更新に失敗しました。' : '企画の登録に失敗しました。');
+        }
+      }
+
+      function enterEditMode(code) {
+        var entry = projectList.find(function (item) {
+          return item.code === code;
+        });
+        if (!entry) {
+          return;
+        }
+        editingOriginalCode = entry.code;
+        document.getElementById('projectCodeInput').value = entry.code;
+        document.getElementById('projectNameInput').value = entry.name;
+        document.getElementById('projectTypeInput').value = entry.type;
+        document.getElementById('projectManagerInput').value = entry.manager;
+        document.getElementById('projectContactInput').value = entry.contact;
+        document.getElementById('projectLocationCodeInput').value = entry.location || '';
+        document.getElementById('projectNotesInput').value = entry.notes;
+        document.getElementById('projectFormTitle').textContent = '企画情報の編集';
+        document.getElementById('projectSubmit').textContent = '更新する';
+        document.getElementById('projectCancel').style.display = 'inline-flex';
+      }
+
+      function resetProjectForm() {
+        editingOriginalCode = null;
+        document.getElementById('projectFormTitle').textContent = '企画登録';
+        document.getElementById('projectSubmit').textContent = '登録する';
+        document.getElementById('projectCancel').style.display = 'none';
+        document.getElementById('projectForm').reset();
+      }
+
+      async function handleDeleteProject(code) {
+        if (!code) {
+          return;
+        }
+        if (!confirm('この企画を削除してよろしいですか？')) {
+          return;
+        }
+        try {
+          var sql = `DELETE FROM projects WHERE project_code = '${escapeSql(code)}';`;
+          await osql.connect(sql);
+          projectList = projectList.filter(function (item) {
+            return item.code !== code;
+          });
+          filteredProjectList = projectList.slice();
+          renderProjectRows();
+          await logOperation('企画削除', `${code} を削除しました。`);
+          if (editingOriginalCode === code) {
+            resetProjectForm();
+          }
+        } catch (error) {
+          console.error('企画削除エラー', error);
+          alert('削除処理でエラーが発生しました。');
+        }
+      }
+
+      async function logOperation(operation, description) {
+        var sql = `INSERT INTO logs (operation, description, operator, created_at) VALUES ('${escapeSql(operation)}', '${escapeSql(description)}', 'admin', CURRENT_TIMESTAMP);`;
+        try {
+          await osql.connect(sql);
+        } catch (error) {
+          console.warn('ログ書き込みに失敗しました。', error);
+        }
+      }
+
+      function escapeText(value) {
+        if (!value) {
+          return '';
+        }
+        return value
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+          .replace(/'/g, '&#39;');
+      }
+
+      function escapeSql(value) {
+        if (!value) {
+          return '';
+        }
+        return value.replace(/'/g, "''");
+      }
+    </script>
+    <style>
+      :root {
+        font-family: 'Inter', system-ui, sans-serif;
+        background-color: #eef2ff;
+        color: #0f172a;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+      }
+
+      main {
+        max-width: 1200px;
+        margin: 0 auto;
+        padding: 1.5rem;
+      }
+
+      header {
+        margin-bottom: 1rem;
+      }
+
+      .admin-actions {
+        margin-top: 0.75rem;
+        margin-bottom: 0.75rem;
+        text-align: right;
+      }
+
+      .primary-link {
+        display: inline-flex;
+        align-items: center;
+        padding: 0.55rem 1rem;
+        border-radius: 999px;
+        border: 1px solid #cbd5f5;
+        color: #0ea5e9;
+        font-weight: 600;
+        text-decoration: none;
+        transition: background 0.2s ease;
+      }
+
+      .primary-link:hover {
+        background: #e0f2fe;
+      }
+
+      .section-title {
+        font-size: 1.6rem;
+        margin: 0.5rem 0 0;
+        font-weight: 600;
+      }
+
+      .panel {
+        background: #ffffff;
+        border-radius: 22px;
+        padding: 1.5rem;
+        box-shadow: 0 22px 50px rgba(15, 23, 42, 0.15);
+      }
+
+      section.panel + section.panel {
+        margin-top: 2rem;
+      }
+
+      .request-panel {
+        margin-top: 1.5rem;
+        background: #ffffff;
+        border-radius: 20px;
+        padding: 1.25rem;
+        box-shadow: 0 20px 45px rgba(15, 23, 42, 0.12);
+      }
+
+      .request-panel__header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 0.75rem;
+      }
+
+      .request-panel__header label {
+        font-weight: 600;
+        color: #0f172a;
+      }
+
+      .request-panel__header select {
+        margin-top: 0.35rem;
+        padding: 0.5rem 0.9rem;
+        border-radius: 10px;
+        border: 1px solid #d1d5db;
+        font-size: 0.9rem;
+      }
+
+      .request-table-wrapper {
+        overflow-x: auto;
+        margin-top: 1rem;
+      }
+
+      .request-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.9rem;
+      }
+
+      .request-table th,
+      .request-table td {
+        padding: 0.65rem;
+        border-bottom: 1px solid #e2e8f0;
+        text-align: left;
+      }
+
+      .request-table th {
+        background: #f8fafc;
+        font-weight: 600;
+      }
+
+      .search-panel {
+        display: flex;
+        gap: 0.75rem;
+        align-items: center;
+        margin-bottom: 1.25rem;
+      }
+
+      .search-panel input {
+        flex: 1;
+        padding: 0.65rem 0.9rem;
+        border-radius: 12px;
+        border: 1px solid #d1d5db;
+        font-size: 0.95rem;
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: 2.4fr 1.6fr;
+        gap: 1.5rem;
+      }
+
+      .data-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.9rem;
+      }
+
+      .table-scroll-wrapper {
+        max-height: 480px;
+        overflow: auto;
+        border: 1px solid #e2e8f0;
+        border-radius: 16px;
+        background: #ffffff;
+        padding: 0.25rem;
+      }
+
+      .list-panel-footer {
+        margin-top: 0.8rem;
+        display: flex;
+        justify-content: flex-end;
+      }
+
+      .csv-export-button {
+        border: none;
+        border-radius: 14px;
+        padding: 0.6rem 1.2rem;
+        background: #1d4ed8;
+        color: #ffffff;
+        font-weight: 600;
+        cursor: pointer;
+        transition: 0.2s ease;
+      }
+
+      .csv-export-button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 12px 30px rgba(29, 78, 216, 0.25);
+      }
+
+      .data-table th,
+      .data-table td {
+        padding: 0.75rem;
+        border-bottom: 1px solid #e2e8f0;
+        text-align: left;
+      }
+
+      .data-table th {
+        background: #f8fafc;
+        font-weight: 600;
+        font-size: 0.85rem;
+      }
+
+      .data-table tbody tr:nth-child(even) {
+        background: #f9fafb;
+      }
+
+      .flex-row {
+        display: flex;
+        align-items: center;
+        gap: 0.65rem;
+        margin-bottom: 1rem;
+      }
+
+      .flex-row label {
+        min-width: 110px;
+        font-weight: 600;
+      }
+
+      .flex-row input,
+      .flex-row select,
+      .flex-row textarea {
+        flex: 1;
+        padding: 0.6rem 0.85rem;
+        border-radius: 12px;
+        border: 1px solid #d2d6ff;
+        font-size: 0.95rem;
+      }
+
+      .form-heading {
+        margin: 0 0 0.5rem;
+        font-weight: 700;
+        font-size: 1.1rem;
+        color: #0f172a;
+      }
+
+      .form-actions {
+        margin-top: 1rem;
+        display: flex;
+        gap: 0.75rem;
+      }
+
+      #projectSubmit {
+        border: none;
+        border-radius: 14px;
+        padding: 0.85rem 1.3rem;
+        font-weight: 600;
+        background: #0ea5e9;
+        color: #fff;
+        cursor: pointer;
+        transition: transform 0.2s ease;
+      }
+
+      #projectSubmit:hover {
+        transform: translateY(-2px);
+      }
+
+      .ghost-button {
+        border: 1px solid #cbd5f5;
+        border-radius: 14px;
+        background: transparent;
+        padding: 0.75rem 1.2rem;
+        font-weight: 600;
+        cursor: pointer;
+        color: #0f172a;
+      }
+
+      .excel-import {
+        margin-top: 1.5rem;
+        padding: 1.5rem;
+        border-radius: 20px;
+        background: linear-gradient(135deg, #f9fbff, #eef3ff);
+        border: 1px solid #dfe7ff;
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.6);
+      }
+
+      .excel-import__header {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        flex-wrap: wrap;
+        gap: 1rem;
+        margin-bottom: 1rem;
+      }
+
+      .excel-import__subtitle {
+        margin: 0;
+        color: #475569;
+        font-size: 0.95rem;
+      }
+
+      .excel-import__badge {
+        margin: 0;
+        font-size: 0.85rem;
+        font-weight: 600;
+        color: #0f172a;
+        background: #e0e7ff;
+        padding: 0.35rem 0.75rem;
+        border-radius: 12px;
+        white-space: nowrap;
+      }
+
+      .excel-import__body {
+        display: grid;
+        gap: 0.85rem;
+      }
+
+      .csv-import-row {
+        display: flex;
+        flex-direction: column;
+        gap: 0.35rem;
+      }
+
+      .csv-input-wrapper {
+        border: 1px dashed #94a3b8;
+        border-radius: 14px;
+        padding: 0.7rem 0.9rem;
+        background: #f8fafc;
+        display: flex;
+        align-items: center;
+        gap: 0.6rem;
+      }
+
+      .csv-input-wrapper input[type='file'] {
+        flex: 1;
+        cursor: pointer;
+      }
+
+      .csv-input-helper {
+        font-size: 0.8rem;
+        color: #475569;
+      }
+
+      .csv-input-note {
+        margin: 0;
+        font-size: 0.85rem;
+        color: #475569;
+      }
+
+      .csv-import-action {
+        justify-content: flex-end;
+      }
+
+      .status-message {
+        font-size: 0.9rem;
+        color: #94a3b8;
+        text-align: center;
+        padding: 0.75rem 0;
+      }
+
+      .actions {
+        display: flex;
+        gap: 0.5rem;
+      }
+
+      .action-button {
+        border: none;
+        border-radius: 12px;
+        padding: 0.35rem 0.85rem;
+        font-size: 0.85rem;
+        font-weight: 600;
+        cursor: pointer;
+      }
+
+      .action-button.edit {
+        background: #e0e7ff;
+        color: #312e81;
+      }
+
+      .action-button.delete {
+        background: #fee2e2;
+        color: #b91c1c;
+      }
+
+      @media (max-width: 900px) {
+        .grid {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <div class="admin-actions">
+          <a class="primary-link" href="admin_equipment.html">備品管理へ移動</a>
+        </div>
+        <p class="section-title">企画管理（管理者用）</p>
+      </header>
+      <section class="panel">
+        <div class="search-panel">
+          <input
+            id="projectSearch"
+            type="search"
+            placeholder="企画コード・企画名・責任者名で検索"
+            oninput="handleProjectFilter()"
+          />
+          <span>件数：<strong id="projectCount">0 件</strong></span>
+        </div>
+        <div class="list-panel">
+          <h3 class="section-title">企画一覧</h3>
+          <div class="table-scroll-wrapper">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>企画コード</th>
+                  <th>企画名</th>
+                  <th>企画種別</th>
+                  <th>責任者</th>
+                  <th>連絡先</th>
+                  <th>場所コード</th>
+                  <th>備考</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody id="projectTableBody">
+                <tr>
+                  <td colspan="8" class="status-message">データを読み込み中...</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="list-panel-footer">
+            <button type="button" class="csv-export-button" onclick="exportProjectListToCsv()">
+              表示中の一覧をCSV出力
+            </button>
+          </div>
+        </div>
+      </section>
+      <section class="panel">
+        <h3 class="section-title">企画登録</h3>
+        <form id="projectForm" onsubmit="handleRegisterProject(event)">
+          <p id="projectFormTitle" class="form-heading">企画登録</p>
+          <div class="flex-row">
+            <label for="projectCodeInput">企画コード</label>
+            <input id="projectCodeInput" type="text" required placeholder="例：PROJ-010" />
+          </div>
+          <div class="flex-row">
+            <label for="projectNameInput">企画名</label>
+            <input id="projectNameInput" type="text" required placeholder="例：新教材開発" />
+          </div>
+          <div class="flex-row">
+            <label for="projectTypeInput">企画種別</label>
+            <input id="projectTypeInput" type="text" placeholder="イベント／制作など" />
+          </div>
+          <div class="flex-row">
+            <label for="projectManagerInput">責任者名</label>
+            <input id="projectManagerInput" type="text" placeholder="例：鈴木 一郎" />
+          </div>
+          <div class="flex-row">
+            <label for="projectContactInput">連絡先</label>
+            <input id="projectContactInput" type="text" placeholder="メールアドレス等" />
+          </div>
+          <div class="flex-row">
+            <label for="projectLocationCodeInput">場所コード</label>
+            <input id="projectLocationCodeInput" type="text" placeholder="例：LOC-001" />
+          </div>
+          <div class="flex-row">
+            <label for="projectNotesInput">備考</label>
+            <textarea id="projectNotesInput" rows="3" placeholder="補足情報など"></textarea>
+          </div>
+          <div class="form-actions">
+            <button id="projectSubmit" type="submit">登録する</button>
+            <button
+              id="projectCancel"
+              type="button"
+              class="ghost-button"
+              onclick="resetProjectForm()"
+              style="display: none"
+            >
+              キャンセル
+            </button>
+          </div>
+        </form>
+        <div class="excel-import">
+          <div class="excel-import__header">
+            <div>
+              <p class="section-title">CSV 一括登録</p>
+              <p class="excel-import__subtitle">
+                project_code / project_name / project_type / manager_name / contact / location_code
+                / notes を含む構成です。
+              </p>
+            </div>
+          </div>
+          <div class="excel-import__body">
+            <div class="csv-import-row">
+              <label for="projectCsvInput">CSV ファイル（project_code などのヘッダー）</label>
+              <div class="csv-input-wrapper">
+                <input
+                  id="projectCsvInput"
+                  type="file"
+                  accept=".csv"
+                  onchange="handleProjectCsvFile(event)"
+                />
+              </div>
+              <p class="csv-input-note">
+                ファイル名に半角スペース／日本語が含まれる場合は UTF-8
+                で保存し、安全なパス名にしておくとトラブルを避けられます。
+              </p>
+            </div>
+            <div class="excel-actions csv-import-action">
+              <button
+                id="projectCsvAction"
+                type="button"
+                class="debug-button"
+                onclick="submitCsvImport()"
+                disabled
+              >
+                一括登録を実行
+              </button>
+              <span id="projectCsvFeedback" class="debug-sql-feedback"></span>
+            </div>
+          </div>
+          <ul class="csv-note">
+            <li>
+              1 行目には必ず <strong>project_code（または「企画コード」）</strong> と
+              <strong>project_name（または「企画名」）</strong> を含めてください。
+            </li>
+            <li>
+              その他は
+              <strong>project_type / manager_name / contact / location_code / notes</strong
+              >（または対応する日本語列）がマッピングされます。
+            </li>
+            <li>
+              UTF-8（BOMなし）で保存し、ヘッダーに余計な空白や不可視文字がないようにしてください。
+            </li>
+          </ul>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>
