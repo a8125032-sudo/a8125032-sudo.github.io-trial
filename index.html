@@ -11,6 +11,30 @@
     <script src="osql.js"></script>
     <script>
         document.addEventListener('DOMContentLoaded', ready);
+        const ADMIN_AUTH_USER = 'admin';
+        const ADMIN_AUTH_PASSWORD = 'EqSysSecure2026';
+
+        function promptAdminCredentials() {
+            for (var attempt = 0; attempt < 3; attempt++) {
+                var username = prompt('管理画面へアクセスするにはユーザー名を入力してください。');
+                if (username === null) {
+                    return;
+                }
+                var password = prompt('パスワードを入力してください。');
+                if (password === null) {
+                    return;
+                }
+                if (
+                    username.trim() === ADMIN_AUTH_USER &&
+                    password === ADMIN_AUTH_PASSWORD
+                ) {
+                    location.href = 'admin_equipment.html';
+                    return;
+                }
+                alert('認証に失敗しました。ユーザー名とパスワードをご確認ください。');
+            }
+            alert('認証に 3 回失敗しました。しばらくお待ちください。');
+        }
 
         function ready() {
             init();
@@ -838,7 +862,7 @@
         </header>
         <section class="admin-link-section">
             <p>管理者向けの備品登録・編集画面にジャンプします。</p>
-            <button type="button" onclick="location.href='admin_equipment.html'">管理画面（備品）へ移動</button>
+            <button type="button" onclick="promptAdminCredentials()">管理画面（備品）へ移動</button>
         </section>
         <section class="search-panel">
             <label for="searchInput">検索</label>
