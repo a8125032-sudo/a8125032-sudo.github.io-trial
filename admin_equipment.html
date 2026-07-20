@@ -1,0 +1,1351 @@
+<!DOCTYPE html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>備品管理（管理者用）</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <script src="https://code.jquery.com/jquery-3.7.0.min.js"></script>
+    <script src="osql.js"></script>
+    <script>
+      document.addEventListener('DOMContentLoaded', ready);
+
+      function ready() {
+        init();
+      }
+
+      async function init() {
+        setupDebugMode();
+        await loadEquipmentData();
+      }
+
+      var equipmentList = [];
+      var filteredEquipmentList = [];
+      var editingOriginalCode = null;
+      var debugModeEnabled = false;
+      var csvImportRows = [];
+      const EQUIPMENT_EXPORT_HEADERS = ['備品コード', '備品名', '在庫数', '保管場所', 'ステータス', '説明', '写真URL'];
+      const EQUIPMENT_EXPORT_FILENAME = '備品一覧.csv';
+
+      function handleCsvFile(event) {
+        var file = event && event.target && event.target.files ? event.target.files[0] : null;
+        var feedback = document.getElementById('excelImportFeedback');
+        var actionButton = document.getElementById('excelImportAction');
+        csvImportRows = [];
+        if (feedback) {
+          feedback.textContent = '';
+        }
+        if (!file) {
+          return;
+        }
+        var reader = new FileReader();
+        reader.onload = function (e) {
+          try {
+            var raw = e.target.result;
+            var rows = parseCsv(raw);
+            if (!rows.length) {
+              throw new Error('CSV データがありません。');
+            }
+            var headers = rows[0].map(function (value) {
+              return value.toString().trim();
+            });
+            csvImportRows = rows.slice(1).map(function (cols) {
+              var row = {};
+              headers.forEach(function (header, index) {
+                row[header] = cols[index] !== undefined ? cols[index] : '';
+              });
+              return row;
+            });
+            var mapped = csvImportRows.map(mapCsvRow);
+            var validCount = mapped.filter(function (entry) {
+              return entry.equipment_code && entry.equipment_name;
+            }).length;
+            if (feedback) {
+              feedback.textContent = `読み込んだ行：${csvImportRows.length} 件（有効：${validCount} 件）`;
+            }
+            if (actionButton) {
+              actionButton.disabled = validCount === 0;
+            }
+          } catch (error) {
+            console.error('CSV 読み込みエラー', error);
+            if (feedback) {
+              feedback.textContent = 'CSV ファイルの解析に失敗しました。';
+            }
+            if (actionButton) {
+              actionButton.disabled = true;
+            }
+          }
+        };
+        reader.readAsText(file, 'UTF-8');
+      }
+
+      function parseCsv(raw) {
+        var rows = [];
+        var row = [];
+        var current = '';
+        var inside = false;
+        for (var i = 0; i < raw.length; i++) {
+          var char = raw[i];
+          var next = raw[i + 1];
+          if (char === '"') {
+            if (inside && next === '"') {
+              current += '"';
+              i++;
+              continue;
+            }
+            inside = !inside;
+            continue;
+          }
+          if (char === ',' && !inside) {
+            row.push(current);
+            current = '';
+            continue;
+          }
+          if ((char === '\n' || char === '\r') && !inside) {
+            if (char === '\r' && next === '\n') {
+              i++;
+            }
+            row.push(current);
+            rows.push(row);
+            row = [];
+            current = '';
+            continue;
+          }
+          current += char;
+        }
+        if (current !== '' || row.length) {
+          row.push(current);
+          rows.push(row);
+        }
+        return rows.filter(function (item) {
+          return (
+            item.length &&
+            item.some(function (cell) {
+              return cell !== '';
+            })
+          );
+        });
+      }
+
+      function mapCsvRow(row) {
+        return {
+          equipment_code: (
+            row.equipment_code ||
+            row.備品コード ||
+            row['Equipment Code'] ||
+            row['equipment code'] ||
+            row.code ||
+            ''
+          )
+            .toString()
+            .trim(),
+          equipment_name: (
+            row.equipment_name ||
+            row.備品名 ||
+            row['Equipment Name'] ||
+            row['equipment name'] ||
+            row.name ||
+            ''
+          )
+            .toString()
+            .trim(),
+          quantity:
+            parseInt(row.quantity || row.数量 || row['Quantity'] || row['quantity'] || '0', 10) ||
+            0,
+          location: (row.location || row.保管場所 || '').toString().trim(),
+          status: (row.status || row.ステータス || '').toString().trim(),
+          description: (row.description || row.説明 || '').toString().trim(),
+          photo_url: (row.photo_url || row['photo URL'] || row['写真URL'] || '').toString().trim(),
+        };
+      }
+
+      async function submitCsvImport() {
+        var feedback = document.getElementById('excelImportFeedback');
+        var actionButton = document.getElementById('excelImportAction');
+        if (actionButton) {
+          actionButton.disabled = true;
+        }
+        if (!csvImportRows.length) {
+          if (feedback) {
+            feedback.textContent = '先に CSV を読み込んでください。';
+          }
+          return;
+        }
+        var mapped = csvImportRows.map(mapCsvRow);
+        var inserted = 0;
+        for (var i = 0; i < mapped.length; i++) {
+          var entry = mapped[i];
+          if (!entry.equipment_code || !entry.equipment_name) {
+            continue;
+          }
+          var sql = `INSERT INTO equipments (equipment_code, equipment_name, quantity, location, status, description, photo_url) VALUES ('${escapeSql(entry.equipment_code)}', '${escapeSql(entry.equipment_name)}', ${entry.quantity}, '${escapeSql(entry.location)}', '${escapeSql(entry.status)}', '${escapeSql(entry.description)}', '${escapeSql(entry.photo_url)}');`;
+          try {
+            await osql.connect(sql);
+            inserted++;
+          } catch (error) {
+            console.warn('CSV 登録エラー', error);
+          }
+        }
+        await loadEquipmentData();
+        if (feedback) {
+          feedback.textContent = `登録完了：${inserted} 件（${mapped.length} 行中）`;
+        }
+        csvImportRows = [];
+      }
+
+      async function loadEquipmentData() {
+        var body = document.getElementById('dataTableBody');
+        body.innerHTML =
+          '<tr><td colspan="8" class="status-message">データを読み込み中...</td></tr>';
+        var sql =
+          'SELECT equipment_code AS code, equipment_name AS name, quantity AS stock, location, status, description, photo_url AS photoUrl FROM equipments ORDER BY equipment_code;';
+        try {
+          var rows = await osql.connect(sql);
+          if (Array.isArray(rows) && rows.length) {
+            equipmentList = rows.map(function (item) {
+              return {
+                code: item.code || 'UNKNOWN',
+                name: item.name || '名称未設定',
+                stock: item.stock || 0,
+                location: item.location || '未設定',
+                status: item.status || '未設定',
+                description: item.description || '',
+                photoUrl: item.photoUrl || '',
+              };
+            });
+          }
+        } catch (error) {
+          console.error('備品データの取得エラー', error);
+        }
+        if (!equipmentList.length) {
+          equipmentList = getSampleData();
+        }
+        filteredEquipmentList = equipmentList.slice();
+        renderTableRows();
+      }
+
+      function getSampleData() {
+        return [
+          {
+            code: 'EQ-001',
+            name: 'プロジェクター',
+            stock: 3,
+            location: '会議室A',
+            status: '貸出可能',
+            description: '4K対応・HDMIケーブル付属',
+            photoUrl: '',
+          },
+          {
+            code: 'EQ-002',
+            name: 'ワイヤレスマイク',
+            stock: 6,
+            location: '機材庫',
+            status: '点検済み',
+            description: '乾電池式・スタンド３本',
+            photoUrl: '',
+          },
+        ];
+      }
+
+      function renderTableRows() {
+        var body = document.getElementById('dataTableBody');
+        var searchCount = document.getElementById('searchResults');
+        if (!filteredEquipmentList.length) {
+          body.innerHTML =
+            '<tr><td colspan="8" class="status-message">条件に一致する備品が見つかりません。</td></tr>';
+          searchCount.textContent = '0 件';
+          return;
+        }
+        searchCount.textContent = `${filteredEquipmentList.length} 件`;
+        body.innerHTML = filteredEquipmentList
+          .map(function (item) {
+            var photo = item.photoUrl
+              ? `<img src="${item.photoUrl}" alt="${escapeText(item.name)}の写真" loading="lazy" class="photo-thumb">`
+              : '<span class="photo-placeholder">写真なし</span>';
+            var safeCode = escapeText(item.code);
+            return `
+                        <tr>
+                            <td>${safeCode}</td>
+                            <td>${escapeText(item.name)}</td>
+                            <td>${item.stock}</td>
+                            <td>${escapeText(item.location)}</td>
+                            <td>${escapeText(item.status)}</td>
+                            <td>${escapeText(item.description)}</td>
+                            <td>${photo}</td>
+                            <td class="actions">
+                                <button type="button" class="action-button edit" data-code="${safeCode}" onclick="enterEditMode(this.dataset.code)">編集</button>
+                                <button type="button" class="action-button delete" data-code="${safeCode}" onclick="handleDeleteEquipment(this.dataset.code)">削除</button>
+                            </td>
+                        </tr>
+                    `;
+          })
+          .join('');
+      }
+
+      function exportEquipmentListToCsv() {
+        if (!filteredEquipmentList.length) {
+          alert('表示中の備品がありません。');
+          return;
+        }
+        downloadCsv(
+          EQUIPMENT_EXPORT_FILENAME,
+          EQUIPMENT_EXPORT_HEADERS,
+          filteredEquipmentList.map(function (item) {
+            return [
+              item.code,
+              item.name,
+              item.stock,
+              item.location,
+              item.status,
+              item.description,
+              item.photoUrl,
+            ];
+          })
+        );
+      }
+
+      function downloadCsv(filename, headers, rows) {
+        var csvLines = [];
+        csvLines.push(headers.join(','));
+        rows.forEach(function (row) {
+          var escapedRow = row.map(function (cell) {
+            return escapeCsvCell(cell);
+          });
+          csvLines.push(escapedRow.join(','));
+        });
+        var blob = new Blob([csvLines.join('\r\n')], { type: 'text/csv;charset=utf-8;' });
+        var link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+        link.setAttribute('download', filename);
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(link.href);
+      }
+
+      function escapeCsvCell(value) {
+        var text = value !== null && value !== undefined ? value.toString() : '';
+        if (/,|\n|"/.test(text)) {
+          return `"${text.replace(/"/g, '""')}"`;
+        }
+        return text;
+      }
+
+      function handleFilterInput() {
+        var keyword = document.getElementById('searchFilter').value.trim().toLowerCase();
+        if (!keyword) {
+          filteredEquipmentList = equipmentList.slice();
+        } else {
+          filteredEquipmentList = equipmentList.filter(function (item) {
+            return (
+              item.code.toLowerCase().indexOf(keyword) !== -1 ||
+              item.name.toLowerCase().indexOf(keyword) !== -1
+            );
+          });
+        }
+        renderTableRows();
+      }
+
+      async function handleRegisterEquipment(event) {
+        event.preventDefault();
+        var code = document.getElementById('inputCode').value.trim();
+        var name = document.getElementById('inputName').value.trim();
+        var stockValue = parseInt(document.getElementById('inputStock').value, 10);
+        var location = document.getElementById('inputLocation').value.trim();
+        var status = document.getElementById('inputStatus').value.trim();
+        var description = document.getElementById('inputDescription').value.trim();
+        var photoUrl = document.getElementById('inputPhoto').value.trim();
+
+        if (!code || !name) {
+          alert('備品コードと備品名は必須です。');
+          return;
+        }
+
+        var stock = isNaN(stockValue) ? 0 : stockValue;
+        var isEditing = Boolean(editingOriginalCode);
+        var sql;
+        if (isEditing) {
+          sql = `UPDATE equipments SET equipment_code='${escapeSql(code)}', equipment_name='${escapeSql(name)}', quantity=${stock}, location='${escapeSql(location)}', status='${escapeSql(status)}', description='${escapeSql(description)}', photo_url='${escapeSql(photoUrl)}' WHERE equipment_code='${escapeSql(editingOriginalCode)}';`;
+        } else {
+          sql = `INSERT INTO equipments (equipment_code, equipment_name, quantity, location, status, description, photo_url) VALUES ('${escapeSql(code)}', '${escapeSql(name)}', ${stock}, '${escapeSql(location)}', '${escapeSql(status)}', '${escapeSql(description)}', '${escapeSql(photoUrl)}');`;
+        }
+
+        try {
+          await osql.connect(sql);
+          var updatedEntry = {
+            code: code,
+            name: name,
+            stock: stock,
+            location: location || '未設定',
+            status: status || '未設定',
+            description: description,
+            photoUrl: photoUrl,
+          };
+          if (isEditing) {
+            var index = equipmentList.findIndex(function (item) {
+              return item.code === editingOriginalCode;
+            });
+            if (index !== -1) {
+              equipmentList[index] = updatedEntry;
+            } else {
+              equipmentList.unshift(updatedEntry);
+            }
+            await logOperation('備品編集', `${editingOriginalCode} → ${code}`);
+          } else {
+            equipmentList.unshift(updatedEntry);
+          }
+          filteredEquipmentList = equipmentList.slice();
+          renderTableRows();
+          resetFormState();
+          alert(isEditing ? '備品情報を更新しました。' : '備品を登録しました。');
+        } catch (error) {
+          console.error('備品登録エラー', error);
+          alert(isEditing ? '備品の更新に失敗しました。' : '備品の登録に失敗しました。');
+        }
+      }
+
+      function enterEditMode(code) {
+        var entry = equipmentList.find(function (item) {
+          return item.code === code;
+        });
+        if (!entry) {
+          return;
+        }
+        editingOriginalCode = entry.code;
+        document.getElementById('inputCode').value = entry.code;
+        document.getElementById('inputName').value = entry.name;
+        document.getElementById('inputStock').value = entry.stock;
+        document.getElementById('inputLocation').value = entry.location;
+        document.getElementById('inputStatus').value = entry.status;
+        document.getElementById('inputDescription').value = entry.description;
+        document.getElementById('inputPhoto').value = entry.photoUrl;
+        document.getElementById('formTitle').textContent = '備品情報の編集';
+        document.getElementById('registerButton').textContent = '更新する';
+        document.getElementById('cancelEdit').style.display = 'inline-flex';
+      }
+
+      function resetFormState() {
+        editingOriginalCode = null;
+        document.getElementById('formTitle').textContent = '備品登録';
+        document.getElementById('registerButton').textContent = '登録する';
+        document.getElementById('cancelEdit').style.display = 'none';
+        document.getElementById('addEquipmentForm').reset();
+      }
+
+      async function handleDeleteEquipment(code) {
+        if (!code) {
+          return;
+        }
+        if (!confirm('この備品を削除してよろしいですか？')) {
+          return;
+        }
+        var sql = `DELETE FROM equipments WHERE equipment_code = '${escapeSql(code)}';`;
+        try {
+          await osql.connect(sql);
+          equipmentList = equipmentList.filter(function (item) {
+            return item.code !== code;
+          });
+          filteredEquipmentList = equipmentList.slice();
+          renderTableRows();
+          await logOperation('備品削除', `${code} を削除しました。`);
+          if (editingOriginalCode === code) {
+            resetFormState();
+          }
+        } catch (error) {
+          console.error('備品削除エラー', error);
+          alert('削除処理でエラーが発生しました。');
+        }
+      }
+
+      async function logOperation(operation, description) {
+        var sql = `INSERT INTO logs (operation, description, operator, created_at) VALUES ('${escapeSql(operation)}', '${escapeSql(description)}', 'admin', CURRENT_TIMESTAMP);`;
+        try {
+          await osql.connect(sql);
+        } catch (error) {
+          console.warn('ログ記録に失敗しました。', error);
+        }
+      }
+
+      async function deleteTableData(tableName, label, afterAction, options = {}) {
+        if (!options.skipConfirm) {
+          if (!confirm(`${label}テーブルの全データを削除します。よろしいですか？`)) {
+            return;
+          }
+        }
+        var sql = `DELETE FROM ${tableName};`;
+        try {
+          await osql.connect(sql);
+          alert(`${label}テーブルのデータを削除しました。`);
+          if (afterAction) {
+            await afterAction();
+          }
+        } catch (error) {
+          console.error(`${label}削除エラー`, error);
+          alert(`${label}テーブルの削除に失敗しました。`);
+        }
+      }
+
+      async function handleDeleteEquipments() {
+        if (
+          !confirm('requests を削除したうえで equipments テーブルを削除します。よろしいですか？')
+        ) {
+          return;
+        }
+        await deleteTableData('requests', 'requests', null, { skipConfirm: true });
+        await deleteTableData(
+          'equipments',
+          'equipments',
+          async function () {
+            await loadEquipmentData();
+          },
+          { skipConfirm: true }
+        );
+      }
+
+      async function handleDeleteRequests() {
+        await deleteTableData('requests', 'requests');
+      }
+
+      async function handleDeleteProjects() {
+        await deleteTableData('projects', 'projects');
+      }
+
+      async function handleDeleteLogs() {
+        await deleteTableData('logs', 'logs');
+      }
+
+      function setupDebugMode() {
+        var stored = localStorage.getItem('debug-mode-enabled');
+        debugModeEnabled = stored === 'true';
+        updateDebugUI();
+        updateManagerValidationButton();
+        updateAcceptRequestsButton();
+      }
+
+      function toggleDebugMode() {
+        debugModeEnabled = !debugModeEnabled;
+        localStorage.setItem('debug-mode-enabled', debugModeEnabled ? 'true' : 'false');
+        updateDebugUI();
+      }
+
+      function updateDebugUI() {
+        var section = document.getElementById('debugSection');
+        if (section) {
+          section.style.display = debugModeEnabled ? 'block' : 'none';
+        }
+        var toggle = document.getElementById('debugModeToggle');
+        if (toggle) {
+          toggle.textContent = debugModeEnabled
+            ? 'デバッグモード：ON（クリックでOFF）'
+            : 'デバッグモード：OFF（クリックでON）';
+          toggle.classList.toggle('active', debugModeEnabled);
+        }
+      }
+
+      function toggleManagerValidation() {
+        var current = localStorage.getItem('skip_manager_validation') === 'true';
+        localStorage.setItem('skip_manager_validation', current ? 'false' : 'true');
+        updateManagerValidationButton();
+      }
+
+      function updateManagerValidationButton() {
+        var button = document.getElementById('managerValidationToggle');
+        if (!button) {
+          return;
+        }
+        var disabled = localStorage.getItem('skip_manager_validation') === 'true';
+        button.textContent = disabled
+          ? '責任者チェック：OFF（クリックでON）'
+          : '責任者チェック：ON（クリックでOFF）';
+      }
+
+      function toggleAcceptRequests() {
+        var current = localStorage.getItem('accept_requests') === 'false';
+        localStorage.setItem('accept_requests', current ? 'true' : 'false');
+        updateAcceptRequestsButton();
+      }
+
+      function updateAcceptRequestsButton() {
+        var button = document.getElementById('acceptRequestsToggle');
+        if (!button) {
+          return;
+        }
+        var enabled = localStorage.getItem('accept_requests') !== 'false';
+        button.textContent = enabled
+          ? '申請受付：ON（クリックでOFF）'
+          : '申請受付：OFF（クリックでON）';
+        button.classList.toggle('debug-toggle__accent-disabled', !enabled);
+      }
+
+      async function executeDebugSql() {
+        var input = document.getElementById('debugSqlInput');
+        var feedback = document.getElementById('debugSqlFeedback');
+        var resultContainer = document.getElementById('debugSqlResult');
+        if (!input || !resultContainer || !feedback) {
+          return;
+        }
+        var sql = input.value.trim();
+        feedback.textContent = '';
+        resultContainer.innerHTML = '';
+        if (!sql) {
+          feedback.textContent = 'SQL を入力してください。';
+          return;
+        }
+        try {
+          var res = await osql.connect(sql, false);
+          var rows = [];
+          if (Array.isArray(res)) {
+            rows = res;
+          } else if (res && Array.isArray(res.objects)) {
+            rows = res.objects;
+          } else if (res && Array.isArray(res.rows)) {
+            rows = res.rows;
+          }
+          var summary = 'SQL を実行しました。';
+          if (rows.length) {
+            summary += ` ${rows.length} 行を取得しました。`;
+            renderDebugSqlResult(rows, resultContainer);
+          } else if (res && typeof res.affectedRows === 'number') {
+            summary += ` 影響行数: ${res.affectedRows}`;
+          } else if (!rows.length) {
+            resultContainer.innerHTML = '<p class="debug-sql-empty">結果がありません。</p>';
+          }
+          feedback.textContent = summary;
+        } catch (error) {
+          console.error('デバッグ SQL エラー', error);
+          feedback.textContent = `SQL 実行エラー：${error && error.message ? error.message : error}`;
+        }
+      }
+
+      function renderDebugSqlResult(rows, container) {
+        if (!rows.length) {
+          return;
+        }
+        var headers = Object.keys(rows[0]);
+        var table = ['<div class="debug-table-wrapper"><table>'];
+        table.push('<thead><tr>');
+        headers.forEach(function (header) {
+          table.push(`<th>${escapeText(header)}</th>`);
+        });
+        table.push('</tr></thead>');
+        table.push('<tbody>');
+        rows.forEach(function (row) {
+          table.push('<tr>');
+          headers.forEach(function (header) {
+            var value = row[header];
+            var safeValue = value !== null && value !== undefined ? String(value) : '';
+            table.push(`<td>${escapeText(safeValue)}</td>`);
+          });
+          table.push('</tr>');
+        });
+        table.push('</tbody></table></div>');
+        container.innerHTML = table.join('');
+      }
+
+      function escapeText(value) {
+        if (!value) {
+          return '';
+        }
+        return value
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+          .replace(/'/g, '&#39;');
+      }
+
+      function escapeSql(value) {
+        if (!value) {
+          return '';
+        }
+        return value.replace(/'/g, "''");
+      }
+    </script>
+    <style>
+      :root {
+        font-family: 'Inter', system-ui, sans-serif;
+        background-color: #f5f6fb;
+        color: #1e293b;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        background: #ebf0ff;
+      }
+
+      main {
+        max-width: 1200px;
+        margin: 0 auto;
+        padding: 1.5rem;
+      }
+
+      header {
+        margin-bottom: 1rem;
+      }
+
+      .admin-actions {
+        margin-top: 0.75rem;
+        margin-bottom: 0.75rem;
+        text-align: right;
+      }
+
+      .primary-link {
+        display: inline-flex;
+        align-items: center;
+        padding: 0.55rem 1rem;
+        border-radius: 999px;
+        border: 1px solid #cbd5f5;
+        color: #0ea5e9;
+        font-weight: 600;
+        text-decoration: none;
+        transition: background 0.2s ease;
+      }
+
+      .primary-link:hover {
+        background: #e0f2fe;
+      }
+
+      .admin-link-section {
+        background: #ffffff;
+        border-radius: 18px;
+        box-shadow: 0 15px 30px rgba(15, 23, 42, 0.08);
+        padding: 1rem 1.25rem;
+        margin-bottom: 1.25rem;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.75rem;
+        align-items: center;
+        justify-content: space-between;
+      }
+
+      .admin-link-section button {
+        border: none;
+        border-radius: 14px;
+        padding: 0.65rem 1.25rem;
+        background: #0ea5e9;
+        color: #ffffff;
+        font-weight: 600;
+        cursor: pointer;
+        transition:
+          transform 0.2s ease,
+          box-shadow 0.2s ease;
+      }
+
+      .admin-link-section button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 10px 25px rgba(14, 165, 233, 0.35);
+      }
+
+      .debug-toggle {
+        margin-top: 0.5rem;
+        text-align: right;
+      }
+
+      .debug-toggle button {
+        border: none;
+        border-radius: 999px;
+        padding: 0.55rem 1.2rem;
+        background: #0ea5e9;
+        color: #ffffff;
+        font-weight: 600;
+        cursor: pointer;
+        transition:
+          background 0.2s ease,
+          transform 0.2s ease;
+      }
+
+      .debug-toggle__secondary {
+        border: 1px solid #e2e8f0;
+        background: #fff;
+        color: #0ea5e9;
+        border-radius: 999px;
+        padding: 0.55rem 1.2rem;
+        font-weight: 600;
+        cursor: pointer;
+        transition:
+          background 0.2s ease,
+          transform 0.2s ease;
+      }
+
+      .debug-toggle__accent {
+        border: 1px solid #cbd5f5;
+        background: #fffbe6;
+        color: #854d00;
+        border-radius: 999px;
+        padding: 0.55rem 1.2rem;
+        font-weight: 600;
+        cursor: pointer;
+        transition:
+          background 0.2s ease,
+          transform 0.2s ease;
+      }
+
+      .debug-toggle__accent-disabled {
+        background: #f1f5f9;
+        color: #94a3b8;
+        border-color: #e2e8f0;
+      }
+
+      .debug-toggle button.active {
+        background: #0471b7;
+      }
+
+      .debug-section {
+        background: #ffffff;
+        border-radius: 18px;
+        box-shadow: 0 15px 30px rgba(15, 23, 42, 0.08);
+        padding: 1.25rem;
+        margin-bottom: 1.25rem;
+      }
+
+      .debug-note {
+        margin: 0;
+        color: #475569;
+        font-size: 0.9rem;
+      }
+
+      .debug-controls {
+        margin-top: 0.75rem;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.75rem;
+      }
+
+      .debug-button {
+        border: 1px solid #e2e8f0;
+        border-radius: 14px;
+        padding: 0.55rem 1.1rem;
+        font-weight: 600;
+        background: #f8fafc;
+        color: #0f172a;
+        cursor: pointer;
+        transition:
+          background 0.2s ease,
+          transform 0.2s ease;
+      }
+
+      .debug-button:hover {
+        background: #e0f2fe;
+        transform: translateY(-1px);
+      }
+
+      .debug-sql-panel {
+        margin-top: 1.5rem;
+        border-top: 1px solid #e5e7eb;
+        padding-top: 1.25rem;
+      }
+
+      .debug-sql-panel textarea {
+        width: 100%;
+        min-height: 120px;
+        border-radius: 14px;
+        border: 1px solid #d1d5db;
+        padding: 0.85rem 1rem;
+        font-family: 'Inter', system-ui, sans-serif;
+        font-size: 0.95rem;
+        resize: vertical;
+      }
+
+      .debug-sql-actions {
+        margin: 0.75rem 0;
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        flex-wrap: wrap;
+      }
+
+      .debug-sql-note {
+        font-size: 0.85rem;
+        color: #64748b;
+      }
+
+      .debug-sql-feedback {
+        min-height: 24px;
+        font-size: 0.9rem;
+        color: #0f172a;
+      }
+
+      .debug-sql-result {
+        margin-top: 0.75rem;
+      }
+
+      .debug-table-wrapper {
+        overflow-x: auto;
+        border-radius: 12px;
+        border: 1px solid #e2e8f0;
+        background: #fff;
+      }
+
+      .debug-table-wrapper table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.85rem;
+      }
+
+      .debug-table-wrapper th,
+      .debug-table-wrapper td {
+        padding: 0.55rem 0.75rem;
+        border-bottom: 1px solid #e5e7eb;
+        text-align: left;
+      }
+
+      .debug-table-wrapper th {
+        background: #f8fafc;
+        font-weight: 600;
+      }
+
+      .debug-sql-empty {
+        color: #64748b;
+        font-size: 0.9rem;
+      }
+
+      .list-panel {
+        margin-top: 1rem;
+      }
+
+      .excel-import {
+        margin-top: 1.5rem;
+        padding: 1rem;
+        border-radius: 16px;
+        background: #f8fafc;
+        border: 1px solid #e2e8f0;
+      }
+
+      .excel-import .excel-row {
+        display: flex;
+        flex-direction: column;
+        gap: 0.4rem;
+      }
+
+      .excel-import input[type='file'] {
+        border: 1px dashed #cbd5f5;
+        border-radius: 12px;
+        padding: 0.6rem;
+        background: #ffffff;
+      }
+
+      .excel-actions {
+        margin-top: 0.8rem;
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+      }
+
+      .csv-note {
+        margin: 0.8rem 0 0;
+        padding-left: 1rem;
+        color: #475569;
+        font-size: 0.9rem;
+        line-height: 1.4;
+        list-style: disc;
+      }
+
+      .section-title {
+        font-size: 1.6rem;
+        margin: 1.5rem 0 0.75rem;
+        font-weight: 600;
+      }
+
+      .panel {
+        background: #ffffff;
+        border-radius: 20px;
+        padding: 1.25rem;
+        box-shadow: 0 20px 45px rgba(15, 23, 42, 0.15);
+      }
+
+      .panel + .panel {
+        margin-top: 1.25rem;
+      }
+
+      .flex-row {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        margin-bottom: 1rem;
+      }
+
+      .form-heading {
+        margin: 0 0 0.5rem;
+        font-weight: 700;
+        font-size: 1.1rem;
+        color: #0f172a;
+      }
+
+      .form-actions {
+        margin-top: 1rem;
+        display: flex;
+        gap: 0.75rem;
+      }
+
+      .ghost-button {
+        border: 1px solid #cbd5f5;
+        border-radius: 14px;
+        background: transparent;
+        padding: 0.7rem 1rem;
+        font-weight: 600;
+        color: #1e293b;
+        cursor: pointer;
+        transition: background 0.2s ease;
+      }
+
+      .ghost-button:hover {
+        background: #f1f5f9;
+      }
+
+      .flex-row label {
+        font-weight: 600;
+        min-width: 120px;
+      }
+
+      .flex-row input,
+      .flex-row select {
+        flex: 1;
+        padding: 0.65rem 0.9rem;
+        border-radius: 12px;
+        border: 1px solid #d2d6ff;
+        font-size: 0.95rem;
+      }
+
+      .data-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.9rem;
+      }
+
+      .table-scroll-wrapper {
+        max-height: 520px;
+        overflow: auto;
+        border: 1px solid #e2e8f0;
+        border-radius: 16px;
+        background: #ffffff;
+        padding: 0.25rem;
+      }
+
+      .list-panel-footer {
+        margin-top: 0.8rem;
+        display: flex;
+        justify-content: flex-end;
+      }
+
+      .csv-export-button {
+        border: none;
+        border-radius: 14px;
+        padding: 0.6rem 1.2rem;
+        background: #1d4ed8;
+        color: #ffffff;
+        font-weight: 600;
+        cursor: pointer;
+        transition: 0.2s ease;
+      }
+
+      .csv-export-button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 12px 30px rgba(29, 78, 216, 0.25);
+      }
+
+      .actions {
+        display: flex;
+        gap: 0.4rem;
+      }
+
+      .action-button {
+        border: none;
+        border-radius: 12px;
+        padding: 0.35rem 0.9rem;
+        font-size: 0.85rem;
+        font-weight: 600;
+        cursor: pointer;
+      }
+
+      .action-button.edit {
+        background: #e0e7ff;
+        color: #312e81;
+      }
+
+      .action-button.delete {
+        background: #fee2e2;
+        color: #b91c1c;
+      }
+
+      .data-table th,
+      .data-table td {
+        padding: 0.85rem;
+        border-bottom: 1px solid #e2e8f0;
+        text-align: left;
+      }
+
+      .data-table th {
+        background: #f8fafc;
+        font-weight: 600;
+      }
+
+      .data-table tbody tr:nth-child(even) {
+        background: #f9fafb;
+      }
+
+      .search-panel {
+        margin-bottom: 1rem;
+        display: flex;
+        gap: 0.75rem;
+        align-items: center;
+      }
+
+      .search-panel input {
+        flex: 1;
+        padding: 0.6rem 0.85rem;
+        border-radius: 12px;
+        border: 1px solid #cbd5f5;
+      }
+
+      #registerButton {
+        border: none;
+        background: #0ea5e9;
+        color: #ffffff;
+        font-weight: 600;
+        padding: 0.75rem 1.25rem;
+        border-radius: 14px;
+        cursor: pointer;
+        transition: transform 0.2s ease;
+      }
+
+      #registerButton:hover {
+        transform: translateY(-2px);
+      }
+
+      .photo-thumb {
+        width: 80px;
+        height: 50px;
+        object-fit: cover;
+        border-radius: 12px;
+      }
+
+      .photo-placeholder {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 80px;
+        height: 50px;
+        border-radius: 12px;
+        background: #e2e8f0;
+        color: #94a3b8;
+        font-size: 0.75rem;
+      }
+
+      .status-message {
+        color: #94a3b8;
+        font-size: 0.9rem;
+        text-align: center;
+        padding: 0.5rem 0;
+      }
+
+      @media (max-width: 960px) {
+        .panel {
+          padding: 1rem;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <div class="admin-actions">
+          <a class="primary-link" href="admin_project.html">企画管理へ移動</a>
+          <a class="primary-link" href="request_status.html">申請状況へ移動</a>
+        </div>
+        <div class="debug-toggle">
+          <button id="debugModeToggle" type="button" onclick="toggleDebugMode()">
+            デバッグモード：OFF（クリックでON）
+          </button>
+        </div>
+        <p class="section-title">備品管理（管理者・編集用）</p>
+      </header>
+      <section class="admin-link-section">
+        <p>閲覧・申請担当者向け画面に戻ります。</p>
+        <button type="button" onclick="location.href = 'index.html'">申請画面（閲覧用）へ</button>
+      </section>
+      <section class="debug-section" id="debugSection" style="display: none">
+        <p class="section-title">デバッグ機能</p>
+        <p class="debug-note">本番環境での利用は緊急時を除いて控えてください</p>
+        <div class="debug-controls">
+          <button type="button" class="debug-toggle__secondary" onclick="toggleManagerValidation()">
+            責任者チェック：ON（クリックでOFF）
+          </button>
+          <button type="button" class="debug-toggle__accent" onclick="toggleAcceptRequests()">
+            申請受付：ON（クリックでOFF）
+          </button>
+          <button type="button" class="debug-button" onclick="handleDeleteEquipments()">
+            equipments を削除
+          </button>
+          <button type="button" class="debug-button" onclick="handleDeleteRequests()">
+            requests を削除
+          </button>
+          <button type="button" class="debug-button" onclick="handleDeleteProjects()">
+            projects を削除
+          </button>
+          <button type="button" class="debug-button" onclick="handleDeleteLogs()">
+            logs を削除
+          </button>
+        </div>
+        <div class="debug-sql-panel">
+          <p class="debug-subtitle">EqSys テーブルへ SQL を直接送信</p>
+          <textarea
+            id="debugSqlInput"
+            placeholder="例：SELECT equipment_code, equipment_name FROM equipments LIMIT 20;"
+          ></textarea>
+          <div class="debug-sql-actions">
+            <button type="button" class="debug-button" onclick="executeDebugSql()">SQL 実行</button>
+            <span class="debug-sql-note"
+              >※ SELECT/INSERT/UPDATE/DELETE など任意の SQL
+              を実行できます。実行前に内容を確認してください。</span
+            >
+          </div>
+          <div id="debugSqlFeedback" class="debug-sql-feedback"></div>
+          <div id="debugSqlResult" class="debug-sql-result"></div>
+        </div>
+      </section>
+      <section class="panel">
+        <div class="search-panel">
+          <label for="searchFilter">検索（コード・名称）</label>
+          <input
+            id="searchFilter"
+            type="search"
+            placeholder="備品コードや備品名で絞り込み"
+            oninput="handleFilterInput()"
+          />
+          <span>件数：<strong id="searchResults">0 件</strong></span>
+        </div>
+        <div class="list-panel">
+          <h3 class="section-title">備品一覧</h3>
+          <div class="table-scroll-wrapper">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>備品コード</th>
+                  <th>備品名</th>
+                  <th>在庫数</th>
+                  <th>保管場所</th>
+                  <th>ステータス</th>
+                  <th>説明</th>
+                  <th>写真</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody id="dataTableBody">
+                <tr>
+                  <td colspan="8" class="status-message">データを読み込み中...</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="list-panel-footer">
+            <button type="button" class="csv-export-button" onclick="exportEquipmentListToCsv()">
+              表示中の一覧をCSV出力
+            </button>
+          </div>
+        </div>
+      </section>
+      <section class="panel">
+        <h3 class="section-title">備品登録</h3>
+        <form id="addEquipmentForm" onsubmit="handleRegisterEquipment(event)">
+          <p id="formTitle" class="form-heading">備品登録</p>
+          <div class="flex-row">
+            <label for="inputCode">備品コード</label>
+            <input id="inputCode" name="code" type="text" placeholder="例: EQ-101" required />
+          </div>
+          <div class="flex-row">
+            <label for="inputName">備品名</label>
+            <input id="inputName" name="name" type="text" placeholder="プロジェクター" required />
+          </div>
+          <div class="flex-row">
+            <label for="inputStock">在庫数</label>
+            <input id="inputStock" name="stock" type="number" min="0" value="1" />
+          </div>
+          <div class="flex-row">
+            <label for="inputLocation">保管場所</label>
+            <input id="inputLocation" name="location" type="text" placeholder="会議室A" />
+          </div>
+          <div class="flex-row">
+            <label for="inputStatus">ステータス</label>
+            <select id="inputStatus" name="status">
+              <option value="貸出可能">貸出可能</option>
+              <option value="貸出中">貸出中</option>
+              <option value="修理中">修理中</option>
+            </select>
+          </div>
+          <div class="flex-row">
+            <label for="inputDescription">説明</label>
+            <input
+              id="inputDescription"
+              name="description"
+              type="text"
+              placeholder="備考・仕様など"
+            />
+          </div>
+          <div class="flex-row">
+            <label for="inputPhoto">写真URL</label>
+            <input
+              id="inputPhoto"
+              name="photoUrl"
+              type="url"
+              placeholder="https://example.com/photo.jpg"
+            />
+          </div>
+          <div class="form-actions">
+            <button id="registerButton" type="submit">登録する</button>
+            <button
+              id="cancelEdit"
+              type="button"
+              class="ghost-button"
+              onclick="resetFormState()"
+              style="display: none"
+            >
+              キャンセル
+            </button>
+          </div>
+        </form>
+        <div class="excel-import">
+          <p class="section-title">CSV 一括登録</p>
+          <div class="excel-row">
+            <label for="excelFileInput">CSV ファイル（equipment_code などのヘッダー）</label>
+            <input id="excelFileInput" type="file" accept=".csv" onchange="handleCsvFile(event)" />
+          </div>
+          <div class="excel-actions">
+            <button
+              id="excelImportAction"
+              type="button"
+              class="debug-button"
+              onclick="submitCsvImport()"
+              disabled
+            >
+              一括登録を実行
+            </button>
+            <span id="excelImportFeedback" class="debug-sql-feedback"></span>
+          </div>
+          <ul class="csv-note">
+            <li>
+              1 行目には必ず <strong>equipment_code（または「備品コード」）</strong> と
+              <strong>equipment_name（または「備品名」）</strong> を含めてください。
+            </li>
+            <li>
+              その他は
+              <strong>quantity / location / status / description / photo_url</strong
+              >（または日本語の対応列）があると自動マッピングされます。
+            </li>
+            <li>
+              UTF-8（BOMなし）で保存し、ヘッダーに余計な空白や不可視文字がないようにしてください。
+            </li>
+          </ul>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>
