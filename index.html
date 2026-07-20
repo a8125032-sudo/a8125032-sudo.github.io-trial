@@ -1,0 +1,897 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>備品一覧（申請用）</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <script src="https://code.jquery.com/jquery-3.7.0.min.js"></script>
+    <script src="osql.js"></script>
+    <script>
+        document.addEventListener('DOMContentLoaded', ready);
+
+        function ready() {
+            init();
+        }
+
+        async function init() {
+            await loadEquipments();
+            await loadRecentRequests();
+        }
+
+        async function loadRecentRequests() {
+            // 現在コンテンツ上で使用していないため、ダミーの Promise を返す。
+            return Promise.resolve();
+        }
+
+        var equipmentList = [];
+        var filteredEquipmentList = [];
+        var requestCart = {};
+        var equipmentCategory = 'all';
+
+        async function loadEquipments() {
+            var grid = document.getElementById('itemsGrid');
+            grid.innerHTML = '<p class="status-message">読み込み中…</p>';
+            var sql = "SELECT equipment_code AS code, equipment_name AS name, quantity AS stock, photo_url AS photoUrl, description FROM equipments ORDER BY equipment_name;";
+            try {
+                var rows = await osql.connect(sql);
+                if (Array.isArray(rows) && rows.length) {
+                    equipmentList = rows.map(function (item) {
+                        return {
+                            code: item.code || 'UNKNOWN',
+                            name: item.name || '名称不明',
+                            stock: item.stock || 0,
+                            photoUrl: item.photoUrl || '',
+                            description: item.description || '特記事項はありません。',
+                        };
+                    });
+                }
+            } catch (error) {
+                console.error('osql読み込みエラー', error);
+            }
+            if (!equipmentList.length) {
+                equipmentList = getSampleData();
+            }
+            filteredEquipmentList = equipmentList.slice();
+            renderEquipmentCards();
+            await updateCartSummary();
+        }
+
+        function getSampleData() {
+            return [
+                {
+                    code: 'EQ-001',
+                    name: 'プロジェクター（4K対応）',
+                    stock: 3,
+                    photoUrl: 'https://images.unsplash.com/photo-1525182008055-f88b95ff7980?auto=format&fit=crop&w=500&q=60',
+                    description: '会議室A/Bで使用可能。付属ケーブルあり。',
+                },
+                {
+                    code: 'EQ-002',
+                    name: 'ポータブルスピーカー',
+                    stock: 10,
+                    photoUrl: 'https://images.unsplash.com/photo-1489515217757-5fd1be406fef?auto=format&fit=crop&w=500&q=60',
+                    description: '屋外イベント向け。防滴仕様。',
+                },
+                {
+                    code: 'EQ-003',
+                    name: 'HDカメラ',
+                    stock: 2,
+                    photoUrl: 'https://images.unsplash.com/photo-1484704849700-f032a568e944?auto=format&fit=crop&w=500&q=60',
+                    description: '三脚付属。撮影設定済み。',
+                },
+            ];
+        }
+
+        function renderEquipmentCards() {
+            var grid = document.getElementById('itemsGrid');
+            if (!filteredEquipmentList.length) {
+                grid.innerHTML = '<p class="status-message">該当する備品がありません。</p>';
+                return;
+            }
+            var filtered = filteredEquipmentList.filter(function (item) {
+                if (equipmentCategory === 'all') {
+                    return true;
+                }
+                var prefix = item.code ? item.code.trim().toLowerCase()[0] : '';
+                return equipmentCategory === 'rental' ? prefix === 'r' : prefix !== 'r';
+            });
+            if (!filtered.length) {
+                grid.innerHTML = '<p class="status-message">該当する備品がありません。</p>';
+                return;
+            }
+            grid.innerHTML = filtered
+                .map(function (item) {
+                    var sanitizedName = escapeText(item.name);
+                    var sanitizedDescription = escapeText(item.description);
+                    var sanitizedCode = escapeText(item.code);
+                    var photo = item.photoUrl
+                        ? `<img src="${item.photoUrl}" alt="${sanitizedName}の写真" loading="lazy">`
+                        : '<div class="empty-photo">写真なし</div>';
+                    var buttonLabel = requestCart[item.code] ? '申請済み' : '申請する';
+                    var buttonState = requestCart[item.code] ? 'added' : '';
+                    return `
+                        <article class="card">
+                            <div class="card-media">${photo}</div>
+                            <div class="card-content">
+                                <div class="card-header">
+                                    <span class="tag">${sanitizedCode}</span>
+                                    <h3>${sanitizedName}</h3>
+                                </div>
+                                <p class="stock">保有在庫数：${item.stock}</p>
+                                <p class="description">${sanitizedDescription}</p>
+                            </div>
+                            <button class="cart-button ${buttonState}" type="button" onclick="handleAddToCart('${sanitizedCode}')">${buttonLabel}</button>
+                        </article>
+                    `;
+                })
+                .join('');
+        }
+
+        function handleAddToCart(code) {
+            if (!code) {
+                return;
+            }
+            var item = equipmentList.find(function (entry) {
+                return entry.code === code;
+            });
+            if (!item) {
+                return;
+            }
+            if (requestCart[code]) {
+                delete requestCart[code];
+            } else {
+                requestCart[code] = {
+                    code: item.code,
+                    name: item.name,
+                    quantity: 1,
+                };
+            }
+            renderEquipmentCards();
+            updateCartSummary();
+        }
+
+        function handleSearchInput() {
+            var keyword = document.getElementById('searchInput').value.trim().toLowerCase();
+            if (!keyword) {
+                filteredEquipmentList = equipmentList.slice();
+            } else {
+                filteredEquipmentList = equipmentList.filter(function (item) {
+                    return (
+                        item.code.toLowerCase().indexOf(keyword) !== -1 ||
+                        item.name.toLowerCase().indexOf(keyword) !== -1
+                    );
+                });
+            }
+            renderEquipmentCards();
+        }
+
+        function setEquipmentCategory(category) {
+            equipmentCategory = category;
+            document.querySelectorAll('.tab-button').forEach(function (button) {
+                button.classList.toggle('active', button.dataset.category === category);
+            });
+            renderEquipmentCards();
+        }
+
+        function escapeText(value) {
+            if (!value) {
+                return '';
+            }
+            return value
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
+        function updateCartSummary() {
+            var container = document.getElementById('cartItems');
+            container.innerHTML = '';
+            var keys = Object.keys(requestCart);
+            if (!keys.length) {
+                container.innerHTML = '<p class="status-message">カートに備品を追加するとこちらに表示されます。</p>';
+                document.getElementById('sendRequest').disabled = true;
+                renderCartListTable();
+                return;
+            }
+            keys.forEach(function (key) {
+                var entry = requestCart[key];
+                var listItem = document.createElement('div');
+                listItem.className = 'cart-entry';
+                listItem.innerHTML = `
+                    <div class="cart-entry-info">
+                        <strong>${escapeText(entry.name)}</strong>
+                        <p class="cart-code">${escapeText(entry.code)}</p>
+                    </div>
+                    <div class="cart-controls">
+                        <label>
+                            数量
+                            <input type="number" min="1" value="${entry.quantity}" onchange="handleQuantityChange('${entry.code}', this.value)">
+                        </label>
+                        <button type="button" class="link-button" onclick="handleAddToCart('${entry.code}')">削除</button>
+                    </div>
+                `;
+                container.appendChild(listItem);
+            });
+            validateSubmission();
+            renderCartListTable();
+        }
+
+        function renderCartListTable() {
+            var tableBody = document.getElementById('cartSummaryTableBody');
+            if (!tableBody) {
+                return;
+            }
+            var keys = Object.keys(requestCart);
+            if (!keys.length) {
+                tableBody.innerHTML = '<tr><td colspan="3" class="status-message">申請カートに備品がありません。</td></tr>';
+                return;
+            }
+            tableBody.innerHTML = keys
+                .map(function (key) {
+                    var entry = requestCart[key];
+                    return `
+                        <tr>
+                            <td>${escapeText(entry.code)}</td>
+                            <td>${escapeText(entry.name)}</td>
+                            <td>${entry.quantity}</td>
+                        </tr>
+                    `;
+                })
+                .join('');
+        }
+
+        function handleQuantityChange(code, value) {
+            var quantity = parseInt(value, 10);
+            if (isNaN(quantity) || quantity <= 0) {
+                quantity = 1;
+            }
+            if (requestCart[code]) {
+                requestCart[code].quantity = quantity;
+            }
+        }
+
+        function getCartInfo() {
+            var applicantElem = document.getElementById('applicantInput'); // 要素の有無を確認
+            return {
+
+                projectCode: document.getElementById('projectCodeInput').value.trim(),
+                applicant: applicantElem ? applicantElem.value.trim() : '', // 要素があれば値を取得、なければ空文字
+                email: document.getElementById('requesterEmail').value.trim(),
+            };    
+        }
+
+
+        function handleCartInfoChange() {
+            validateSubmission();
+        }
+
+        function validateSubmission() {
+            var info = getCartInfo();
+            var hasItems = Object.keys(requestCart).length > 0;
+            var hasInfo = info.projectCode || info.applicant || info.email;
+            document.getElementById('sendRequest').disabled = !(hasItems && hasInfo);
+        }
+
+        async function handleSendRequest() {
+            var keys = Object.keys(requestCart);
+            if (!keys.length) {
+                alert('申請する備品がありません。');
+                return;
+            }
+            var info = getCartInfo();
+            var projectCode = info.projectCode || 'UNKNOWN';
+            var applicant = info.applicant || 'unknown';
+            var email = info.email;
+            var payload = [];
+            if (!shouldAcceptRequests()) {
+                alert('現在、申請の受付を停止しています。');
+                return;
+            }
+            if (!shouldSkipManagerValidation()) {
+                var managerName = await getProjectManagerName(projectCode);
+                if (managerName === null) {
+                    alert('指定された企画コードの責任者情報が見つかりません。');
+                    return;
+                }
+                if (managerName) {
+                    var normalizedManager = normalizeName(managerName);
+                    var normalizedApplicant = normalizeName(applicant);
+                    if (normalizedManager && normalizedApplicant && normalizedManager !== normalizedApplicant) {
+                        alert('企画コードに登録されている責任者名と申請者名が一致していません。');
+                        return;
+                    }
+                }
+            }
+            try {
+                for (var i = 0; i < keys.length; i++) {
+                    var entry = requestCart[keys[i]];
+                    var requestCode = generateRequestCode();
+                    var sql = `INSERT INTO requests (request_code, project_code, equipment_code, quantity, status, applicant, requested_at) VALUES ('${escapeSql(requestCode)}', '${escapeSql(projectCode)}', '${escapeSql(entry.code)}', ${entry.quantity}, '申請待ち', '${escapeSql(applicant)}', CURRENT_TIMESTAMP);`;
+                    await osql.connect(sql);
+                    await logOperation('申請送信', `${requestCode} ${entry.code} x${entry.quantity}`, applicant);
+                    payload.push(`${entry.code}：${entry.quantity}個`);
+                }
+                console.log('申請データ', payload);
+                alert('申請内容を送信しました。');
+                requestCart = {};
+                await updateCartSummary();
+                renderEquipmentCards();
+                localStorage.setItem('requests-last-updated', Date.now().toString());
+            } catch (error) {
+                console.error('申請エラー', error);
+                alert('申請処理でエラーが発生しました。');
+            }
+        }
+
+        async function logOperation(operation, description, operator) {
+            if (!operator) {
+                operator = 'unknown';
+            }
+            var sql = `INSERT INTO logs (operation, description, operator, created_at) VALUES ('${escapeSql(operation)}', '${escapeSql(description)}', '${escapeSql(operator)}', CURRENT_TIMESTAMP);`;
+            try {
+                await osql.connect(sql);
+            } catch (error) {
+                console.warn('ログ記録に失敗しました。', error);
+            }
+        }
+
+        function generateRequestCode() {
+            var timestamp = Date.now();
+            var random = Math.floor(Math.random() * 1000);
+            return `REQ-${timestamp}-${String(random).padStart(3, '0')}`;
+        }
+
+        async function getProjectManagerName(projectCode) {
+            if (!projectCode) {
+                return null;
+            }
+            var sql = `SELECT manager_name FROM projects WHERE project_code = '${escapeSql(projectCode)}' LIMIT 1;`;
+            try {
+                var rows = await osql.connect(sql);
+                if (Array.isArray(rows) && rows.length) {
+                    return rows[0].manager_name || '';
+                }
+            } catch (error) {
+                console.error('企画責任者名取得エラー', error);
+            }
+            return null;
+        }
+
+        function normalizeName(value) {
+            if (!value) {
+                return '';
+            }
+            return value
+                .replace(/\s|　/g, '')
+                .toLowerCase();
+        }
+
+        function shouldSkipManagerValidation() {
+            return localStorage.getItem('skip_manager_validation') === 'true';
+        }
+
+        function shouldAcceptRequests() {
+            return localStorage.getItem('accept_requests') !== 'false';
+        }
+
+        function escapeSql(value) {
+            if (!value) {
+                return '';
+            }
+            return value.replace(/'/g, "''");
+        }
+    </script>
+    <style>
+        :root {
+            font-family: 'Inter', system-ui, sans-serif;
+            background-color: #f4f6fb;
+            color: #1f2933;
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+        }
+
+        main {
+            padding: 1.5rem;
+            max-width: 1200px;
+            margin: 0 auto 2rem;
+        }
+
+        .page-header {
+            text-align: left;
+            margin-bottom: 1.5rem;
+        }
+
+        .page-title {
+            font-size: 2rem;
+            margin: 0.5rem 0 0;
+            font-weight: 700;
+        }
+
+        .page-lead {
+            margin: 0.2rem 0 0;
+            color: #475569;
+        }
+
+        .admin-link-section {
+            background: #ffffff;
+            border-radius: 20px;
+            padding: 1rem 1.25rem;
+            margin-bottom: 1.25rem;
+            box-shadow: 0 15px 30px rgba(15, 23, 42, 0.08);
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 0.75rem;
+            justify-content: space-between;
+            color: #0f172a;
+        }
+
+        .admin-link-section button {
+            border: none;
+            border-radius: 16px;
+            padding: 0.65rem 1.25rem;
+            font-weight: 600;
+            cursor: pointer;
+            background: #0ea5e9;
+            color: #ffffff;
+            transition: transform 0.2s ease, box-shadow 0.2s ease;
+        }
+
+        .admin-link-section button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 25px rgba(14, 165, 233, 0.35);
+        }
+
+        .search-panel {
+            margin: 1rem 0 1.5rem;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.75rem;
+            align-items: center;
+        }
+
+        .category-tabs {
+            display: flex;
+            gap: 0.5rem;
+            flex-wrap: wrap;
+            margin-bottom: 1rem;
+        }
+
+        .tab-button {
+            border: 1px solid #cbd5f5;
+            border-radius: 999px;
+            padding: 0.45rem 1rem;
+            font-weight: 600;
+            background: #fff;
+            color: #0f172a;
+            cursor: pointer;
+            transition: background 0.2s ease, color 0.2s ease, border 0.2s ease;
+        }
+
+        .tab-button.active {
+            background: #0ea5e9;
+            color: #fff;
+            border-color: #0ea5e9;
+        }
+
+        .search-panel label {
+            font-weight: 600;
+            color: #0f172a;
+        }
+
+        .search-panel input {
+            flex: 1;
+            min-width: 240px;
+            padding: 0.65rem 1rem;
+            border-radius: 16px;
+            border: 1px solid #cbd5f5;
+            font-size: 1rem;
+            transition: border 0.2s ease;
+        }
+
+        .search-panel input:focus {
+            outline: none;
+            border-color: #6366f1;
+            box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.2);
+        }
+
+        .content-grid {
+            display: grid;
+            grid-template-columns: 1fr 320px;
+            gap: 1.5rem;
+        }
+
+        .items-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+            gap: 1rem;
+        }
+
+        .items-scroll-wrapper {
+            max-height: 760px;
+            overflow: auto;
+            padding-right: 0.75rem;
+            border: 1px solid #e2e8f0;
+            border-radius: 20px;
+            background: #ffffff;
+        }
+
+        .card {
+            background: #ffffff;
+            border-radius: 16px;
+            padding: 1rem;
+            display: flex;
+            flex-direction: column;
+            gap: 0.75rem;
+            box-shadow: 0 14px 40px rgba(15, 23, 42, 0.08);
+            position: relative;
+            overflow: hidden;
+            justify-content: space-between;
+        }
+
+        .card-media {
+            height: 150px;
+            border-radius: 12px;
+            background: #e0e7ff;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
+        }
+
+        .card-media img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            display: block;
+        }
+
+        .empty-photo {
+            color: #94a3b8;
+            font-size: 0.9rem;
+        }
+
+        .card-content h3 {
+            margin: 0.2rem 0;
+            font-size: 1.1rem;
+        }
+
+        .tag {
+            font-size: 0.8rem;
+            padding: 0.1rem 0.6rem;
+            border-radius: 999px;
+            background: #eef2ff;
+            color: #4c1d95;
+            font-weight: 600;
+        }
+
+        .stock {
+            margin: 0;
+            font-weight: 600;
+            color: #0f172a;
+        }
+
+        .description {
+            margin: 0;
+            color: #475569;
+            line-height: 1.4;
+            font-size: 0.95rem;
+        }
+
+        .cart-button {
+            border: none;
+            border-radius: 999px;
+            padding: 0.6rem 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background 0.2s ease, color 0.2s ease;
+            background: #6366f1;
+            color: #ffffff;
+            width: 100%;
+            text-align: center;
+            margin-top: auto;
+        }
+
+        .cart-button.added {
+            background: #d1d5db;
+            color: #374151;
+        }
+
+        .cart-section {
+            background: #ffffff;
+            border-radius: 20px;
+            padding: 1.25rem;
+            box-shadow: 0 20px 40px rgba(15, 23, 42, 0.12);
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+            height: fit-content;
+        }
+
+        .cart-section h2 {
+            margin: 0;
+            font-size: 1.2rem;
+        }
+
+        .cart-info {
+            display: grid;
+            gap: 0.65rem;
+        }
+
+        .cart-info label {
+            display: flex;
+            flex-direction: column;
+            font-size: 0.85rem;
+            font-weight: 600;
+            color: #0f172a;
+        }
+
+        .cart-info input {
+            margin-top: 0.25rem;
+            padding: 0.5rem 0.75rem;
+            border-radius: 10px;
+            border: 1px solid #d1d5db;
+            font-size: 0.9rem;
+        }
+
+        #cartItems {
+            display: flex;
+            flex-direction: column;
+            gap: 0.8rem;
+            max-height: 360px;
+            overflow: auto;
+        }
+
+        .cart-entry {
+            padding: 0.75rem;
+            border-radius: 14px;
+            background: #f8fafc;
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            gap: 0.5rem;
+        }
+
+        .cart-entry-info {
+            flex: 1;
+            min-width: 0;
+        }
+
+        .cart-entry strong {
+            display: block;
+        }
+
+        .cart-code {
+            margin: 0.25rem 0 0;
+            color: #94a3b8;
+            font-size: 0.85rem;
+        }
+
+        .cart-controls {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            align-self: flex-start;
+            min-width: 90px;
+        }
+
+        .cart-controls input {
+            width: 72px;
+            padding: 0.35rem 0.5rem;
+            border-radius: 10px;
+            border: 1px solid #d1d5db;
+            text-align: center;
+        }
+
+        .cart-controls label {
+            margin: 0;
+            display: flex;
+            flex-direction: column;
+            gap: 0.15rem;
+            font-size: 0.75rem;
+            color: #475569;
+            letter-spacing: 0.02em;
+            font-weight: 600;
+        }
+
+        .link-button {
+            border: none;
+            background: transparent;
+            color: #6366f1;
+            font-weight: 600;
+            cursor: pointer;
+            writing-mode: horizontal-tb;
+            text-transform: none;
+        }
+
+        #sendRequest {
+            border: none;
+            border-radius: 16px;
+            padding: 0.9rem;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            background: #0ea5e9;
+            color: #fff;
+            transition: transform 0.2s ease;
+        }
+
+        #sendRequest:disabled {
+            background: #94a3b8;
+            cursor: not-allowed;
+        }
+
+        #sendRequest:not(:disabled):hover {
+            transform: translateY(-2px);
+        }
+
+        .status-message {
+            margin: 0;
+            color: #94a3b8;
+            font-size: 0.95rem;
+        }
+
+        .cart-list-panel {
+            margin-top: 1.5rem;
+            background: #ffffff;
+            border-radius: 20px;
+            padding: 1.25rem;
+            box-shadow: 0 20px 40px rgba(15, 23, 42, 0.12);
+        }
+
+        .cart-list-scroll {
+            max-height: 300px;
+            overflow: auto;
+            border: 1px solid #e2e8f0;
+            border-radius: 16px;
+            margin-top: 0.5rem;
+        }
+
+        .cart-list-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        .cart-list-table th,
+        .cart-list-table td {
+            padding: 0.65rem;
+            text-align: left;
+            border-bottom: 1px solid #e5e7eb;
+        }
+
+        .cart-list-table th {
+            background: #f8fafc;
+            font-weight: 600;
+        }
+
+        .requests-panel {
+            margin-top: 2rem;
+            background: #ffffff;
+            border-radius: 20px;
+            padding: 1.25rem;
+            box-shadow: 0 20px 45px rgba(15, 23, 42, 0.12);
+        }
+
+        .requests-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 0.5rem;
+        }
+
+        .requests-header h3 {
+            margin: 0;
+            font-size: 1.2rem;
+        }
+
+        .requests-table-wrapper {
+            overflow-x: auto;
+            margin-top: 1rem;
+        }
+
+        .request-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.9rem;
+        }
+
+        .request-table th,
+        .request-table td {
+            padding: 0.65rem;
+            border-bottom: 1px solid #e5e7eb;
+            text-align: left;
+        }
+
+        .request-table th {
+            background: #f8fafc;
+            font-weight: 600;
+        }
+
+        @media (max-width: 960px) {
+            .content-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .cart-section {
+                margin-top: 1rem;
+            }
+        }
+    </style>
+</head>
+<body>
+    <main>
+        <header class="page-header">
+            <p class="page-title">備品一覧（閲覧・申請用）</p>
+            <p class="page-lead">備品コードまたは備品名で検索し、必要な備品をカートに入れてからまとめて申請してください。</p>
+        </header>
+        <section class="admin-link-section">
+            <p>管理者向けの備品登録・編集画面にジャンプします。</p>
+            <button type="button" onclick="location.href='admin_equipment.html'">管理画面（備品）へ移動</button>
+        </section>
+        <section class="search-panel">
+            <label for="searchInput">検索</label>
+            <input id="searchInput" type="search" name="search" placeholder="備品コード／備品名で検索" oninput="handleSearchInput()">
+        </section>
+        <section class="category-tabs" aria-label="備品カテゴリ">
+            <button type="button" class="tab-button active" data-category="all" onclick="setEquipmentCategory('all')">全て表示</button>
+            <button type="button" class="tab-button" data-category="rental" onclick="setEquipmentCategory('rental')">レンタル備品 (コード r*)</button>
+            <button type="button" class="tab-button" data-category="campus" onclick="setEquipmentCategory('campus')">学内備品</button>
+        </section>
+        <section class="content-grid">
+            <div class="items-scroll-wrapper">
+                <div class="items-grid" id="itemsGrid"></div>
+            </div>
+            <aside class="cart-section">
+                <h2>申請カート</h2>
+                <div class="cart-info">
+                    <label>
+                        企画コード
+                        <input id="projectCodeInput" type="text" placeholder="企画コードを入力" oninput="handleCartInfoChange()">
+                    </label>
+                    <label>
+                        申請者名
+                        <input id="applicantInput" type="text" placeholder="例：山田 太郎" oninput="handleCartInfoChange()">
+                    </label>
+                    <label>
+                        メールアドレス
+                        <input id="requesterEmail" type="email" placeholder="example@example.com" oninput="handleCartInfoChange()">
+                    </label>
+                </div>
+                <div id="cartItems">
+                    <p class="status-message">カートに備品を追加するとこちらに表示されます。</p>
+                </div>
+                <button id="sendRequest" type="button" onclick="handleSendRequest()" disabled>申請内容を送信</button>
+            </aside>
+        </section>
+        <section class="cart-list-panel">
+            <h3>申請カート内の備品一覧</h3>
+            <div class="cart-list-scroll">
+                <table class="cart-list-table">
+                    <thead>
+                        <tr>
+                            <th>備品コード</th>
+                            <th>備品名</th>
+                            <th>数量</th>
+                        </tr>
+                    </thead>
+                    <tbody id="cartSummaryTableBody">
+                        <tr><td colspan="3" class="status-message">申請カートに備品がありません。</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+    </main>
+</body>
+</html>
