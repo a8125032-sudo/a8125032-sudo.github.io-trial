@@ -5,6 +5,6 @@
 使用したプログラミング言語：HTML, CSS, JavaScript
 開発環境：MindCode
 使用したライブラリ：jquery, osql.js, google fonts (Inter)
-プログラムの実行方法：
+プログラムの実行方法：github pagesにて公開
 
 
