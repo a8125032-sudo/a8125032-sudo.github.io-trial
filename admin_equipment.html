@@ -1176,10 +1176,20 @@
         <p class="section-title">デバッグ機能</p>
         <p class="debug-note">本番環境での利用は緊急時を除いて控えてください</p>
         <div class="debug-controls">
-          <button type="button" class="debug-toggle__secondary" onclick="toggleManagerValidation()">
+          <button
+            id="managerValidationToggle"
+            type="button"
+            class="debug-toggle__secondary"
+            onclick="toggleManagerValidation()"
+          >
             責任者チェック：ON（クリックでOFF）
           </button>
-          <button type="button" class="debug-toggle__accent" onclick="toggleAcceptRequests()">
+          <button
+            id="acceptRequestsToggle"
+            type="button"
+            class="debug-toggle__accent"
+            onclick="toggleAcceptRequests()"
+          >
             申請受付：ON（クリックでOFF）
           </button>
           <button type="button" class="debug-button" onclick="handleDeleteEquipments()">
